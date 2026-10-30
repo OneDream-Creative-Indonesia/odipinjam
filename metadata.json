@@ -1,0 +1,6 @@
+{
+  "name": "SiPinjam — Sistem Manajemen Peminjaman & Inventaris Barang",
+  "description": "Platform manajemen inventaris dan peminjaman barang berbasis peran (Admin & Anggota) dengan pelacakan ketersediaan real-time, kode QR, bulk import CSV/Excel, bukti foto, laporan bulanan, dan notifikasi email otomatis.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
