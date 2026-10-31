@@ -454,6 +454,7 @@ export default function App() {
   const handleBorrowItem = (payload: {
     item: InventoryItem;
     quantity: number;
+    entries?: Array<{ item: InventoryItem; quantity: number }>;
     borrowDate: string;
     dueDate: string;
     durationDays: number;
@@ -461,53 +462,68 @@ export default function App() {
     borrowPhotoDataUrl: string;
   }) => {
     if (!currentUser) return;
-    const newLoan: LoanRecord = {
-      id: `ln-${Date.now()}`,
-      itemId: payload.item.id,
-      itemQrCode: payload.item.qrCode,
-      itemName: payload.item.name,
-      itemCategory: payload.item.category,
+
+    const borrowList =
+      payload.entries && payload.entries.length > 0
+        ? payload.entries
+        : [{ item: payload.item, quantity: payload.quantity }];
+
+    const baseTime = Date.now();
+    const newLoans: LoanRecord[] = borrowList.map((entry, idx) => ({
+      id: `ln-${baseTime}-${idx}`,
+      itemId: entry.item.id,
+      itemQrCode: entry.item.qrCode,
+      itemName: entry.item.name,
+      itemCategory: entry.item.category,
       userId: currentUser.id,
       userName: currentUser.name,
       userEmail: currentUser.email,
       userDepartment: currentUser.department,
-      quantity: payload.quantity,
+      quantity: entry.quantity,
       borrowDate: payload.borrowDate,
       dueDate: payload.dueDate,
       durationDays: payload.durationDays,
       purposeNotes: payload.purposeNotes,
       borrowPhotoDataUrl: payload.borrowPhotoDataUrl,
       status: 'dipinjam',
-    };
+    }));
 
-    // Decrement available stock in real-time
-    const nextItems = items.map((it) =>
-      it.id === payload.item.id
-        ? {
-          ...it,
-          availableStock: Math.max(0, it.availableStock - payload.quantity),
-        }
-        : it
-    );
+    // Decrement available stock in real-time for all borrowed items
+    const qtyByItemId = new Map<string, number>();
+    for (const entry of borrowList) {
+      qtyByItemId.set(
+        entry.item.id,
+        (qtyByItemId.get(entry.item.id) || 0) + entry.quantity
+      );
+    }
 
-    // Send confirmation email
-    const confirmEmail: EmailNotification = {
-      id: `email-borrow-${newLoan.id}`,
+    const nextItems = items.map((it) => {
+      const deduct = qtyByItemId.get(it.id);
+      if (!deduct) return it;
+      return {
+        ...it,
+        availableStock: Math.max(0, it.availableStock - deduct),
+      };
+    });
+
+    // Send confirmation emails
+    const confirmEmails: EmailNotification[] = newLoans.map((ln) => ({
+      id: `email-borrow-${ln.id}`,
       recipientEmail: currentUser.email,
       recipientName: currentUser.name,
       userId: currentUser.id,
-      loanId: newLoan.id,
-      itemName: payload.item.name,
-      itemQrCode: payload.item.qrCode,
+      loanId: ln.id,
+      itemName: ln.itemName,
+      itemQrCode: ln.itemQrCode,
       type: 'konfirmasi_peminjaman',
-      subject: `[Bukti Peminjaman ODipinjam] ${payload.item.name} (${payload.item.qrCode})`,
-      body: `Halo ${currentUser.name},\n\nPeminjaman barang "${payload.item.name}" (Kode QR: ${payload.item.qrCode}, Jumlah: ${payload.quantity} unit) telah berhasil tercatat.\nBatas waktu pengembalian: ${new Date(payload.dueDate).toLocaleDateString('id-ID')} (${payload.durationDays} hari).\nCatatan pemakaian: ${payload.purposeNotes}\n\nSistem akan mengirimkan pengingat email otomatis apabila batas waktu peminjaman hampir habis.`,
+      subject: `[Bukti Peminjaman ODipinjam] ${ln.itemName} (${ln.itemQrCode})`,
+      body: `Halo ${currentUser.name},\n\nPeminjaman barang "${ln.itemName}" (Kode QR: ${ln.itemQrCode}, Jumlah: ${ln.quantity} unit) telah berhasil tercatat.\nBatas waktu pengembalian: ${new Date(payload.dueDate).toLocaleDateString('id-ID')} (${payload.durationDays} hari).\nCatatan pemakaian: ${payload.purposeNotes}\n\nSistem akan mengirimkan pengingat email otomatis apabila batas waktu peminjaman hampir habis.`,
       sentAt: payload.borrowDate,
       read: false,
-    };
+    }));
 
-    const nextLoans = [newLoan, ...loans];
-    const nextEmails = [confirmEmail, ...emails];
+    const nextLoans = [...newLoans, ...loans];
+    const nextEmails = [...confirmEmails, ...emails];
 
     setItems(nextItems);
     setLoans(nextLoans);
