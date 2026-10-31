@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   EmailNotification,
   InventoryItem,
@@ -148,6 +148,107 @@ export default function App() {
   const [inspectedQrItem, setInspectedQrItem] =
     useState<InventoryItem | null>(null);
 
+  const latestStateRef = useRef({ users, items, loans, emails });
+  useEffect(() => {
+    latestStateRef.current = { users, items, loans, emails };
+  }, [users, items, loans, emails]);
+
+  const pushStateToServer = useCallback(
+    async (partial: {
+      users?: User[];
+      items?: InventoryItem[];
+      loans?: LoanRecord[];
+      emails?: EmailNotification[];
+    }) => {
+      const payload = {
+        users: partial.users ?? latestStateRef.current.users,
+        items: partial.items ?? latestStateRef.current.items,
+        loans: partial.loans ?? latestStateRef.current.loans,
+        emails: partial.emails ?? latestStateRef.current.emails,
+      };
+      latestStateRef.current = payload;
+      try {
+        await fetch('/api/state', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+      } catch {
+        // Fallback to localStorage when running without backend API
+      }
+    },
+    []
+  );
+
+  const pullStateFromServer = useCallback(async () => {
+    try {
+      const res = await fetch('/api/state', { cache: 'no-store' });
+      if (!res.ok) return null;
+      const data = await res.json();
+      const serverUsers: User[] = Array.isArray(data.users) ? data.users : [];
+      const serverItems: InventoryItem[] = Array.isArray(data.items)
+        ? data.items
+        : [];
+      const serverLoans: LoanRecord[] = Array.isArray(data.loans)
+        ? data.loans
+        : [];
+      const serverEmails: EmailNotification[] = Array.isArray(data.emails)
+        ? data.emails
+        : [];
+
+      const serverIsEmpty =
+        !data.initialized ||
+        (serverUsers.length <= 1 &&
+          serverItems.length === 0 &&
+          serverLoans.length === 0);
+
+      const local = latestStateRef.current;
+      const localHasData =
+        local.users.length > 1 ||
+        local.items.length > 0 ||
+        local.loans.length > 0;
+
+      if (serverIsEmpty && localHasData) {
+        await pushStateToServer(local);
+        return local;
+      }
+
+      if (data.initialized && serverUsers.length > 0) {
+        const normalizedUsers = serverUsers.map((u: User) =>
+          u.id === 'usr-admin-master'
+            ? {
+                ...u,
+                email: INITIAL_USERS[0].email,
+                password: INITIAL_USERS[0].password,
+              }
+            : u
+        );
+        setUsers(normalizedUsers);
+        setItems(serverItems);
+        setLoans(serverLoans);
+        setEmails(serverEmails);
+        return {
+          users: normalizedUsers,
+          items: serverItems,
+          loans: serverLoans,
+          emails: serverEmails,
+        };
+      }
+    } catch {
+      // Ignore network/API errors in offline preview
+    }
+    return null;
+  }, [pushStateToServer]);
+
+  // Initial pull & periodic real-time sync across devices (Laptop <-> Handphone)
+  useEffect(() => {
+    pullStateFromServer();
+    const timer = setInterval(() => {
+      pullStateFromServer();
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [pullStateFromServer]);
+
   // Sync state to localStorage
   useEffect(() => {
     try {
@@ -201,8 +302,10 @@ export default function App() {
       referenceTimeIso
     );
     if (newNotifications.length > 0) {
-      setEmails((prev) => [...newNotifications, ...prev]);
+      const nextEmails = [...newNotifications, ...emails];
+      setEmails(nextEmails);
       setLoans(updatedLoans);
+      pushStateToServer({ emails: nextEmails, loans: updatedLoans });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -213,10 +316,12 @@ export default function App() {
   );
 
   // Handlers
-  const handleLoginSubmit = (e: React.FormEvent) => {
+  const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoginError(null);
-    const result = authenticateUser(users, loginEmail, loginPassword);
+    const synced = await pullStateFromServer();
+    const activeUsersList = synced?.users || users;
+    const result = authenticateUser(activeUsersList, loginEmail, loginPassword);
     if (result.error || !result.user) {
       setLoginError(result.error || 'Gagal masuk.');
       return;
@@ -242,8 +347,10 @@ export default function App() {
       nowIso
     );
     if (newNotifications.length > 0) {
-      setEmails((prev) => [...newNotifications, ...prev]);
+      const nextEmails = [...newNotifications, ...emails];
+      setEmails(nextEmails);
       setLoans(updatedLoans);
+      pushStateToServer({ emails: nextEmails, loans: updatedLoans });
     }
     return newNotifications.length;
   };
@@ -268,7 +375,9 @@ export default function App() {
       sentAt: nowIso,
       read: false,
     };
-    setEmails((prev) => [newEmail, ...prev]);
+    const nextEmails = [newEmail, ...emails];
+    setEmails(nextEmails);
+    pushStateToServer({ emails: nextEmails });
   };
 
   const handleAddItem = (newItem: Omit<InventoryItem, 'id' | 'createdAt'>) => {
@@ -277,7 +386,9 @@ export default function App() {
       id: `itm-${Date.now()}`,
       createdAt: new Date().toISOString(),
     };
-    setItems((prev) => [created, ...prev]);
+    const nextItems = [created, ...items];
+    setItems(nextItems);
+    pushStateToServer({ items: nextItems });
   };
 
   const handleBulkAddItems = (
@@ -289,26 +400,30 @@ export default function App() {
       id: `itm-bulk-${Date.now()}-${idx}`,
       createdAt: nowIso,
     }));
-    setItems((prev) => [...createdList, ...prev]);
+    const nextItems = [...createdList, ...items];
+    setItems(nextItems);
+    pushStateToServer({ items: nextItems });
   };
 
   const handleDeleteItem = (itemId: string) => {
-    setItems((prev) => prev.filter((i) => i.id !== itemId));
+    const nextItems = items.filter((i) => i.id !== itemId);
+    setItems(nextItems);
+    pushStateToServer({ items: nextItems });
   };
 
   const handleUpdateItemStock = (itemId: string, delta: number) => {
-    setItems((prev) =>
-      prev.map((item) => {
-        if (item.id !== itemId) return item;
-        const newTotal = Math.max(1, item.totalStock + delta);
-        const newAvail = Math.max(0, item.availableStock + delta);
-        return {
-          ...item,
-          totalStock: newTotal,
-          availableStock: newAvail,
-        };
-      })
-    );
+    const nextItems = items.map((item) => {
+      if (item.id !== itemId) return item;
+      const newTotal = Math.max(1, item.totalStock + delta);
+      const newAvail = Math.max(0, item.availableStock + delta);
+      return {
+        ...item,
+        totalStock: newTotal,
+        availableStock: newAvail,
+      };
+    });
+    setItems(nextItems);
+    pushStateToServer({ items: nextItems });
   };
 
   const handleRegisterUser = (newUser: Omit<User, 'id' | 'createdAt'>) => {
@@ -317,17 +432,23 @@ export default function App() {
       id: `usr-${Date.now()}`,
       createdAt: new Date().toISOString(),
     };
-    setUsers((prev) => [...prev, created]);
+    const nextUsers = [...users, created];
+    setUsers(nextUsers);
+    pushStateToServer({ users: nextUsers });
   };
 
   const handleToggleUserActive = (userId: string) => {
-    setUsers((prev) =>
-      prev.map((u) => (u.id === userId ? { ...u, active: !u.active } : u))
+    const nextUsers = users.map((u) =>
+      u.id === userId ? { ...u, active: !u.active } : u
     );
+    setUsers(nextUsers);
+    pushStateToServer({ users: nextUsers });
   };
 
   const handleDeleteUser = (userId: string) => {
-    setUsers((prev) => prev.filter((u) => u.id !== userId));
+    const nextUsers = users.filter((u) => u.id !== userId);
+    setUsers(nextUsers);
+    pushStateToServer({ users: nextUsers });
   };
 
   const handleBorrowItem = (payload: {
@@ -360,15 +481,13 @@ export default function App() {
     };
 
     // Decrement available stock in real-time
-    setItems((prev) =>
-      prev.map((it) =>
-        it.id === payload.item.id
-          ? {
-            ...it,
-            availableStock: Math.max(0, it.availableStock - payload.quantity),
-          }
-          : it
-      )
+    const nextItems = items.map((it) =>
+      it.id === payload.item.id
+        ? {
+          ...it,
+          availableStock: Math.max(0, it.availableStock - payload.quantity),
+        }
+        : it
     );
 
     // Send confirmation email
@@ -387,8 +506,17 @@ export default function App() {
       read: false,
     };
 
-    setLoans((prev) => [newLoan, ...prev]);
-    setEmails((prev) => [confirmEmail, ...prev]);
+    const nextLoans = [newLoan, ...loans];
+    const nextEmails = [confirmEmail, ...emails];
+
+    setItems(nextItems);
+    setLoans(nextLoans);
+    setEmails(nextEmails);
+    pushStateToServer({
+      items: nextItems,
+      loans: nextLoans,
+      emails: nextEmails,
+    });
   };
 
   const handleReturnItem = (payload: {
@@ -401,33 +529,29 @@ export default function App() {
 
     const nowIso = new Date().toISOString();
 
-    setLoans((prev) =>
-      prev.map((l) =>
-        l.id === payload.loanId
-          ? {
-            ...l,
-            status: 'dikembalikan',
-            returnDate: nowIso,
-            returnNotes: payload.returnNotes,
-            returnPhotoDataUrl: payload.returnPhotoDataUrl,
-          }
-          : l
-      )
+    const nextLoans: LoanRecord[] = loans.map((l) =>
+      l.id === payload.loanId
+        ? {
+          ...l,
+          status: 'dikembalikan',
+          returnDate: nowIso,
+          returnNotes: payload.returnNotes,
+          returnPhotoDataUrl: payload.returnPhotoDataUrl,
+        }
+        : l
     );
 
     // Increment available stock back in real-time
-    setItems((prev) =>
-      prev.map((it) =>
-        it.id === targetLoan.itemId
-          ? {
-            ...it,
-            availableStock: Math.min(
-              it.totalStock,
-              it.availableStock + targetLoan.quantity
-            ),
-          }
-          : it
-      )
+    const nextItems = items.map((it) =>
+      it.id === targetLoan.itemId
+        ? {
+          ...it,
+          availableStock: Math.min(
+            it.totalStock,
+            it.availableStock + targetLoan.quantity
+          ),
+        }
+        : it
     );
 
     const returnEmail: EmailNotification = {
@@ -445,13 +569,24 @@ export default function App() {
       read: false,
     };
 
-    setEmails((prev) => [returnEmail, ...prev]);
+    const nextEmails = [returnEmail, ...emails];
+
+    setLoans(nextLoans);
+    setItems(nextItems);
+    setEmails(nextEmails);
+    pushStateToServer({
+      loans: nextLoans,
+      items: nextItems,
+      emails: nextEmails,
+    });
   };
 
   const handleMarkEmailsRead = (userId: string) => {
-    setEmails((prev) =>
-      prev.map((e) => (e.userId === userId ? { ...e, read: true } : e))
+    const nextEmails = emails.map((e) =>
+      e.userId === userId ? { ...e, read: true } : e
     );
+    setEmails(nextEmails);
+    pushStateToServer({ emails: nextEmails });
   };
 
   // RENDER LOGIN VIEW IF NOT AUTHENTICATED

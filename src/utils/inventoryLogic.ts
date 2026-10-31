@@ -503,11 +503,14 @@ export function authenticateUser(
   password: string
 ): { user?: User; error?: string } {
   const cleanEmail = email.trim().toLowerCase();
-  if (!cleanEmail || !password) {
+  const cleanPassword = password.trim();
+  if (!cleanEmail || !cleanPassword) {
     return { error: 'Email dan password wajib diisi.' };
   }
   const matched = users.find(
-    (u) => u.email.toLowerCase() === cleanEmail && u.password === password
+    (u) =>
+      u.email.trim().toLowerCase() === cleanEmail &&
+      (u.password === password || u.password.trim() === cleanPassword)
   );
   if (!matched) {
     return { error: 'Email atau password tidak sesuai.' };
