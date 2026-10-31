@@ -31,11 +31,111 @@ export function generateQrCodeString(
 }
 
 /**
- * Generates a deterministic 21x21 QR-Code matrix with standard finder patterns,
- * timing lines, and encoded payload bits for crisp SVG rendering.
+ * Generates a standard-compliant ISO/IEC 18004 QR-Code matrix (Byte mode, EC Level L)
+ * with Reed-Solomon error correction so real camera scanners (iOS/Android/jsQR/BarcodeDetector)
+ * can scan and decode the QR code directly.
  */
-export function generateQrMatrix(text: string, size = 21): boolean[][] {
-  const n = Math.max(21, size);
+export function generateQrMatrix(text: string, _size = 21): boolean[][] {
+  const payload = (text || '').trim() || 'INV-DEFAULT';
+  const utf8Bytes = Array.from(new TextEncoder().encode(payload));
+
+  // ISO/IEC 18004 Version 1..4 capacities for EC Level L (single RS block)
+  const versions = [
+    { version: 1, size: 21, dataBytes: 19, ecBytes: 7, align: [] as number[] },
+    { version: 2, size: 25, dataBytes: 34, ecBytes: 10, align: [6, 18] },
+    { version: 3, size: 29, dataBytes: 55, ecBytes: 15, align: [6, 22] },
+    { version: 4, size: 33, dataBytes: 80, ecBytes: 20, align: [6, 26] },
+  ];
+
+  // Pick smallest version that fits: 4 bits mode + 8 bits length + 8*N bits
+  const chosen =
+    versions.find((v) => utf8Bytes.length + 2 <= v.dataBytes) || versions[3];
+  const maxPayload = chosen.dataBytes - 2;
+  const data = utf8Bytes.slice(0, maxPayload);
+  const n = chosen.size;
+
+  // Build bit stream: Mode 0100 (Byte), 8-bit char count, byte data, terminator, pad bytes
+  const bitStream: number[] = [];
+  const pushBits = (val: number, len: number) => {
+    for (let i = len - 1; i >= 0; i--) {
+      bitStream.push((val >> i) & 1);
+    }
+  };
+
+  pushBits(0b0100, 4);
+  pushBits(data.length, 8);
+  for (const b of data) {
+    pushBits(b, 8);
+  }
+
+  const maxDataBits = chosen.dataBytes * 8;
+  const terminatorLen = Math.min(4, maxDataBits - bitStream.length);
+  pushBits(0, terminatorLen);
+  while (bitStream.length % 8 !== 0) {
+    bitStream.push(0);
+  }
+
+  const dataCodewords: number[] = [];
+  for (let i = 0; i < bitStream.length; i += 8) {
+    let byte = 0;
+    for (let b = 0; b < 8; b++) {
+      byte = (byte << 1) | bitStream[i + b];
+    }
+    dataCodewords.push(byte);
+  }
+
+  const padBytes = [0xec, 0x11];
+  let padIdx = 0;
+  while (dataCodewords.length < chosen.dataBytes) {
+    dataCodewords.push(padBytes[padIdx % 2]);
+    padIdx++;
+  }
+
+  // Reed-Solomon GF(256) with primitive polynomial 0x11d
+  const gfExp = new Uint8Array(512);
+  const gfLog = new Uint8Array(256);
+  let x = 1;
+  for (let i = 0; i < 255; i++) {
+    gfExp[i] = x;
+    gfLog[x] = i;
+    x <<= 1;
+    if (x & 0x100) x ^= 0x11d;
+  }
+  for (let i = 255; i < 512; i++) {
+    gfExp[i] = gfExp[i - 255];
+  }
+  const gfMul = (a: number, b: number) =>
+    a === 0 || b === 0 ? 0 : gfExp[gfLog[a] + gfLog[b]];
+
+  let gen = [1];
+  for (let i = 0; i < chosen.ecBytes; i++) {
+    const next = new Array(gen.length + 1).fill(0);
+    const root = gfExp[i];
+    for (let j = 0; j < gen.length; j++) {
+      next[j] ^= gen[j];
+      next[j + 1] ^= gfMul(gen[j], root);
+    }
+    gen = next;
+  }
+
+  const ecCodewords = new Array(chosen.ecBytes).fill(0);
+  for (const byte of dataCodewords) {
+    const factor = byte ^ ecCodewords[0];
+    ecCodewords.shift();
+    ecCodewords.push(0);
+    for (let j = 0; j < chosen.ecBytes; j++) {
+      ecCodewords[j] ^= gfMul(gen[j + 1], factor);
+    }
+  }
+
+  const allCodewords = [...dataCodewords, ...ecCodewords];
+  const allBits: number[] = [];
+  for (const cw of allCodewords) {
+    for (let b = 7; b >= 0; b--) {
+      allBits.push((cw >> b) & 1);
+    }
+  }
+
   const matrix: boolean[][] = Array.from({ length: n }, () =>
     Array(n).fill(false)
   );
@@ -65,43 +165,82 @@ export function generateQrMatrix(text: string, size = 21): boolean[][] {
   placeFinder(0, n - 7);
   placeFinder(n - 7, 0);
 
-  // Timing patterns
-  for (let i = 8; i < n - 8; i++) {
-    reserved[6][i] = true;
-    matrix[6][i] = i % 2 === 0;
-    reserved[i][6] = true;
-    matrix[i][6] = i % 2 === 0;
-  }
-
-  // Deterministic bit stream from text
-  const payload = text.trim() || 'INV-DEFAULT';
-  const bits: boolean[] = [];
-  let hash = 2166136261;
-  for (let i = 0; i < payload.length; i++) {
-    const code = payload.charCodeAt(i);
-    hash ^= code;
-    hash = Math.imul(hash, 16777619);
-    for (let b = 7; b >= 0; b--) {
-      bits.push(((code >> b) & 1) === 1);
-    }
-  }
-  // Pad bits deterministically
-  for (let i = 0; i < n * n; i++) {
-    hash ^= (i + 1) * 31;
-    hash = Math.imul(hash, 16777619);
-    bits.push((Math.abs(hash) & 1) === 1);
-  }
-
-  let bitIdx = 0;
-  for (let r = 0; r < n; r++) {
-    for (let c = 0; c < n; c++) {
-      if (!reserved[r][c]) {
-        const mask = (r + c) % 2 === 0;
-        matrix[r][c] = bits[bitIdx % bits.length] !== mask;
-        bitIdx++;
+  // Alignment patterns for Version >= 2
+  if (chosen.align.length > 0) {
+    for (const ar of chosen.align) {
+      for (const ac of chosen.align) {
+        if (reserved[ar][ac]) continue;
+        for (let r = -2; r <= 2; r++) {
+          for (let c = -2; c <= 2; c++) {
+            const rr = ar + r;
+            const cc = ac + c;
+            reserved[rr][cc] = true;
+            const isBorder = Math.abs(r) === 2 || Math.abs(c) === 2;
+            const isCenter = r === 0 && c === 0;
+            matrix[rr][cc] = isBorder || isCenter;
+          }
+        }
       }
     }
   }
+
+  // Timing patterns
+  for (let i = 8; i < n - 8; i++) {
+    if (!reserved[6][i]) {
+      reserved[6][i] = true;
+      matrix[6][i] = i % 2 === 0;
+    }
+    if (!reserved[i][6]) {
+      reserved[i][6] = true;
+      matrix[i][6] = i % 2 === 0;
+    }
+  }
+
+  // Dark module and Format Information areas
+  reserved[n - 8][8] = true;
+  matrix[n - 8][8] = true;
+
+  for (let i = 0; i < 9; i++) {
+    reserved[8][i] = true;
+    reserved[i][8] = true;
+  }
+  for (let i = 0; i < 8; i++) {
+    reserved[8][n - 1 - i] = true;
+    reserved[n - 1 - i][8] = true;
+  }
+
+  // Place data bits in upward/downward 2-column zigzag with Mask Pattern 0: (r + c) % 2 === 0
+  let bitIdx = 0;
+  let upward = true;
+  for (let rightCol = n - 1; rightCol >= 1; rightCol -= 2) {
+    if (rightCol === 6) rightCol = 5; // Skip vertical timing column 6
+    for (let step = 0; step < n; step++) {
+      const r = upward ? n - 1 - step : step;
+      for (let dCol = 0; dCol < 2; dCol++) {
+        const c = rightCol - dCol;
+        if (!reserved[r][c]) {
+          const dataBit = bitIdx < allBits.length ? allBits[bitIdx] === 1 : false;
+          bitIdx++;
+          const mask = (r + c) % 2 === 0;
+          matrix[r][c] = dataBit !== mask;
+        }
+      }
+    }
+    upward = !upward;
+  }
+
+  // Write Format Information for EC Level L (01) + Mask 0 (000) => 0x77c4
+  const formatBits = 0x77c4;
+  const fBit = (i: number) => ((formatBits >> i) & 1) === 1;
+
+  for (let i = 0; i <= 5; i++) matrix[i][8] = fBit(i);
+  matrix[7][8] = fBit(6);
+  matrix[8][8] = fBit(7);
+  matrix[8][7] = fBit(8);
+  for (let i = 9; i <= 14; i++) matrix[8][14 - i] = fBit(i);
+
+  for (let i = 0; i <= 7; i++) matrix[8][n - 1 - i] = fBit(i);
+  for (let i = 8; i <= 14; i++) matrix[n - 15 + i][8] = fBit(i);
 
   return matrix;
 }

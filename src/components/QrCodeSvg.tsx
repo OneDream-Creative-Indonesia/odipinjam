@@ -16,7 +16,7 @@ export const QrCodeSvg: React.FC<QrCodeSvgProps> = ({
 }) => {
   const matrix = useMemo(() => generateQrMatrix(value, 21), [value]);
   const n = matrix.length;
-  const quietZone = 2;
+  const quietZone = 4;
   const totalModules = n + quietZone * 2;
 
   return (
@@ -66,7 +66,7 @@ export const QrLabelModal: React.FC<QrLabelModalProps> = ({ item, onClose }) => 
   const handleDownloadSvg = () => {
     const matrix = generateQrMatrix(item.qrCode, 21);
     const n = matrix.length;
-    const q = 2;
+    const q = 4;
     const total = n + q * 2;
     let rects = '';
     matrix.forEach((row, r) => {

@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   EmailNotification,
   InventoryItem,
@@ -61,8 +61,8 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
   onReturnItem,
   onMarkEmailsRead,
 }) => {
-  // Borrow form state
-  const [scannedQrCode, setScannedQrCode] = useState(() => items[0]?.qrCode || '');
+  // Borrow form state (starts empty so nothing is randomly detected before scanning)
+  const [scannedQrCode, setScannedQrCode] = useState('');
   const [quantity, setQuantity] = useState(1);
   const [durationDays, setDurationDays] = useState(3);
   const [dueDateInput, setDueDateInput] = useState(() => {
@@ -73,9 +73,11 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
   const [borrowPhotoDataUrl, setBorrowPhotoDataUrl] = useState('');
   const [borrowError, setBorrowError] = useState<string | null>(null);
   const [borrowSuccess, setBorrowSuccess] = useState<string | null>(null);
-  const [cameraActive, setCameraActive] = useState(false);
+  const [cameraTarget, setCameraTarget] = useState<'borrow' | 'return' | null>(null);
   const [cameraStatusMsg, setCameraStatusMsg] = useState<string | null>(null);
+  const [scanSuccessMsg, setScanSuccessMsg] = useState<string | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
 
   // Return form state
   const [selectedReturnLoanId, setSelectedReturnLoanId] = useState<string>('');
@@ -141,36 +143,220 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
     setDurationDays(days);
   };
 
-  const handleStartCameraScan = async () => {
+  const handleStopCameraScan = useCallback(() => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
+    }
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+    setCameraTarget(null);
+  }, []);
+
+  const applyDecodedQrResult = useCallback(
+    (rawValue: string, target: 'borrow' | 'return') => {
+      const code = rawValue.trim().toUpperCase();
+      if (!code) return;
+      try {
+        navigator.vibrate?.(100);
+      } catch {
+        // ignore
+      }
+      if (target === 'borrow') {
+        setScannedQrCode(code);
+      } else {
+        setReturnQrInput(code);
+        const matchedLoan = myActiveLoans.find(
+          (l) => l.itemQrCode.toLowerCase() === code.toLowerCase()
+        );
+        if (matchedLoan) {
+          setSelectedReturnLoanId(matchedLoan.id);
+        }
+      }
+      setScanSuccessMsg(`Berhasil memindai Kode QR: ${code}`);
+      setCameraStatusMsg(null);
+      handleStopCameraScan();
+    },
+    [handleStopCameraScan, myActiveLoans]
+  );
+
+  const decodeQrFromCanvas = useCallback(
+    async (canvas: HTMLCanvasElement): Promise<string | null> => {
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      if (!ctx || canvas.width === 0 || canvas.height === 0) return null;
+
+      // 1. Try native BarcodeDetector if available (Android Chrome / Edge / WebView)
+      const Win = window as unknown as {
+        BarcodeDetector?: new (opts?: { formats: string[] }) => {
+          detect: (source: HTMLCanvasElement) => Promise<Array<{ rawValue?: string }>>;
+        };
+        jsQR?: (
+          data: Uint8ClampedArray,
+          width: number,
+          height: number,
+          options?: { inversionAttempts?: string }
+        ) => { data?: string } | null;
+      };
+
+      if (typeof Win.BarcodeDetector === 'function') {
+        try {
+          const detector = new Win.BarcodeDetector({
+            formats: ['qr_code', 'code_128', 'code_39', 'ean_13', 'ean_8'],
+          });
+          const barcodes = await detector.detect(canvas);
+          if (barcodes && barcodes.length > 0 && barcodes[0].rawValue) {
+            return barcodes[0].rawValue.trim();
+          }
+        } catch {
+          // fallback to jsQR
+        }
+      }
+
+      // 2. Try jsQR (works across iOS Safari, Firefox, Chrome, etc.)
+      if (typeof Win.jsQR === 'function') {
+        try {
+          const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+          const qr = Win.jsQR(imgData.data, imgData.width, imgData.height, {
+            inversionAttempts: 'attemptBoth',
+          });
+          if (qr && qr.data && qr.data.trim()) {
+            return qr.data.trim();
+          }
+        } catch {
+          // ignore
+        }
+      }
+
+      return null;
+    },
+    []
+  );
+
+  // Attach MediaStream after <video> mounts and run continuous QR/barcode detection
+  useEffect(() => {
+    if (!cameraTarget || !streamRef.current) return;
+    const videoEl = videoRef.current;
+    if (!videoEl) return;
+
+    videoEl.srcObject = streamRef.current;
+    videoEl.setAttribute('playsinline', 'true');
+    videoEl.play().catch(() => {
+      // autoplay handled
+    });
+
+    const offscreen = document.createElement('canvas');
+    let isCancelled = false;
+
+    const intervalId = window.setInterval(async () => {
+      if (isCancelled || !videoRef.current) return;
+      const v = videoRef.current;
+      if (v.readyState < 2 || v.videoWidth === 0 || v.videoHeight === 0) return;
+
+      offscreen.width = v.videoWidth;
+      offscreen.height = v.videoHeight;
+      const ctx = offscreen.getContext('2d', { willReadFrequently: true });
+      if (!ctx) return;
+      ctx.drawImage(v, 0, 0, offscreen.width, offscreen.height);
+
+      const detected = await decodeQrFromCanvas(offscreen);
+      if (!isCancelled && detected) {
+        applyDecodedQrResult(detected, cameraTarget);
+      }
+    }, 220);
+
+    return () => {
+      isCancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [cameraTarget, decodeQrFromCanvas, applyDecodedQrResult]);
+
+  // Stop camera when switching tabs or unmounting
+  useEffect(() => {
+    return () => {
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((t) => t.stop());
+        streamRef.current = null;
+      }
+    };
+  }, [activeTab]);
+
+  const handleStartCameraScan = async (target: 'borrow' | 'return') => {
     setCameraStatusMsg(null);
+    setScanSuccessMsg(null);
+
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       setCameraStatusMsg(
-        'Kamera tidak terdeteksi pada perangkat ini. Gunakan pemilih QR cepat atau unggah label QR.'
+        'Browser ini tidak mengizinkan akses kamera langsung. Gunakan tombol "Foto QR" di sebelahnya untuk memindai lewat kamera HP.'
       );
       return;
     }
+
+    handleStopCameraScan();
+
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'environment' },
-      });
-      setCameraActive(true);
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
+      let stream: MediaStream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: { ideal: 'environment' },
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+          },
+          audio: false,
+        });
+      } catch {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: true,
+          audio: false,
+        });
       }
+      streamRef.current = stream;
+      setCameraTarget(target);
     } catch {
       setCameraStatusMsg(
-        'Izin kamera tidak tersedia di lingkungan pratinjau ini. Silakan klik salah satu Kode QR barang di bawah untuk simulasi scan instan.'
+        'Izin kamera ditolak atau tidak tersedia. Pastikan izin kamera diaktifkan di browser HP Anda, atau gunakan tombol "Foto QR".'
       );
     }
   };
 
-  const handleStopCameraScan = () => {
-    if (videoRef.current && videoRef.current.srcObject) {
-      const stream = videoRef.current.srcObject as MediaStream;
-      stream.getTracks().forEach((t) => t.stop());
-      videoRef.current.srcObject = null;
-    }
-    setCameraActive(false);
+  const handleScanQrFromImageFile = (
+    e: React.ChangeEvent<HTMLInputElement>,
+    target: 'borrow' | 'return'
+  ) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setCameraStatusMsg(null);
+    setScanSuccessMsg(null);
+
+    const img = new Image();
+    const objectUrl = URL.createObjectURL(file);
+    img.onload = async () => {
+      const canvas = document.createElement('canvas');
+      const maxDim = 1200;
+      const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+      canvas.width = Math.max(1, Math.round(img.width * scale));
+      canvas.height = Math.max(1, Math.round(img.height * scale));
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      if (ctx) {
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        const decoded = await decodeQrFromCanvas(canvas);
+        if (decoded) {
+          applyDecodedQrResult(decoded, target);
+        } else {
+          setCameraStatusMsg(
+            'Kode QR tidak terbaca dari foto tersebut. Pastikan foto Kode QR terlihat jelas dan terang.'
+          );
+        }
+      }
+      URL.revokeObjectURL(objectUrl);
+      e.target.value = '';
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      setCameraStatusMsg('Gagal memuat gambar Kode QR.');
+    };
+    img.src = objectUrl;
   };
 
   const handleBorrowPhotoFile = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -184,10 +370,13 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
   };
 
   const handleCaptureInstantBorrowPhoto = () => {
-    const targetItem = matchedItem || items[0];
+    if (!matchedItem) {
+      setBorrowError('Silakan scan atau masukkan Kode QR barang terlebih dahulu sebelum mengambil bukti foto.');
+      return;
+    }
     const svgUrl = createEquipmentPhotoProofSvg({
-      title: targetItem ? targetItem.name : 'Unit Inventaris',
-      qrCode: targetItem ? targetItem.qrCode : scannedQrCode || 'INV-QR',
+      title: matchedItem.name,
+      qrCode: matchedItem.qrCode,
       actorName: currentUser.name,
       timestampLabel: new Date().toLocaleString('id-ID'),
       badgeText: 'BUKTI FOTO PINJAM',
@@ -469,40 +658,68 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
                 >
                   1. Scan atau Masukkan Kode QR Barang *
                 </label>
-                <div className="flex gap-2">
+                <div className="flex flex-wrap gap-2">
                   <input
                     id="scan-qr-input"
                     type="text"
                     value={scannedQrCode}
-                    onChange={(e) => setScannedQrCode(e.target.value)}
-                    placeholder="Contoh: INV-FOT-SON-0001"
-                    className="flex-1 px-3 py-2 text-xs font-mono bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-[#0d113a] focus:ring-1 focus:ring-[#0d113a]"
+                    onChange={(e) => {
+                      setScannedQrCode(e.target.value);
+                      setScanSuccessMsg(null);
+                    }}
+                    placeholder="Scan atau ketik Kode QR..."
+                    className="flex-1 min-w-[160px] px-3 py-2 text-xs font-mono bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-[#0d113a] focus:ring-1 focus:ring-[#0d113a]"
                   />
                   <button
                     type="button"
-                    onClick={
-                      cameraActive ? handleStopCameraScan : handleStartCameraScan
+                    onClick={() =>
+                      cameraTarget === 'borrow'
+                        ? handleStopCameraScan()
+                        : handleStartCameraScan('borrow')
                     }
-                    className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-slate-800 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors whitespace-nowrap shrink-0"
+                    className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-white bg-[#0d113a] hover:bg-[#151c54] rounded-lg transition-colors whitespace-nowrap shrink-0 shadow-xs"
                   >
                     <ScanLine className="w-3.5 h-3.5 text-[#e71f69]" />
-                    {cameraActive ? 'Tutup Kamera' : 'Kamera QR'}
+                    {cameraTarget === 'borrow' ? 'Tutup Kamera' : 'Kamera QR'}
                   </button>
+                  <label className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-slate-800 bg-slate-100 hover:bg-slate-200 rounded-lg cursor-pointer transition-colors whitespace-nowrap shrink-0">
+                    <Camera className="w-3.5 h-3.5 text-[#e71f69]" />
+                    Foto QR
+                    <input
+                      type="file"
+                      accept="image/*"
+                      capture="environment"
+                      onChange={(e) => handleScanQrFromImageFile(e, 'borrow')}
+                      className="sr-only"
+                    />
+                  </label>
                 </div>
               </div>
 
-              {cameraActive && (
-                <div className="p-3 bg-slate-900 rounded-lg text-center space-y-2">
-                  <video
-                    ref={videoRef}
-                    autoPlay
-                    playsInline
-                    muted
-                    className="w-full h-40 object-cover rounded border border-slate-700"
-                  />
-                  <p className="text-xs text-slate-300">
-                    Arahkan kamera ke stiker Kode QR pada barang...
+              {cameraTarget === 'borrow' && (
+                <div className="p-3 bg-slate-900 rounded-lg text-center space-y-2 relative overflow-hidden">
+                  <div className="relative rounded overflow-hidden border border-slate-700 bg-black">
+                    <video
+                      ref={videoRef}
+                      autoPlay
+                      playsInline
+                      muted
+                      className="w-full h-56 object-cover"
+                    />
+                    <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+                      <div className="w-40 h-40 border-2 border-[#e71f69] rounded-lg shadow-[0_0_0_9999px_rgba(0,0,0,0.35)]" />
+                    </div>
+                  </div>
+                  <p className="text-xs text-slate-200">
+                    Arahkan kamera ke Kode QR / Barcode pada barang...
                   </p>
+                </div>
+              )}
+
+              {scanSuccessMsg && (
+                <div className="p-2.5 bg-emerald-50 border border-emerald-200 rounded-lg text-xs font-medium text-emerald-700 flex items-center gap-2">
+                  <CheckCircle2 className="w-4 h-4 shrink-0" />
+                  <span>{scanSuccessMsg}</span>
                 </div>
               )}
 
@@ -513,7 +730,16 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
               )}
 
               {/* Matched Item Card */}
-              {matchedItem ? (
+              {!scannedQrCode.trim() ? (
+                <div className="p-4 bg-slate-50 border border-dashed border-slate-300 rounded-lg text-xs text-slate-600 flex items-start gap-2.5">
+                  <QrCode className="w-4 h-4 text-slate-400 shrink-0 mt-0.5" />
+                  <span>
+                    Belum ada Kode QR yang dipindai. Klik tombol{' '}
+                    <strong className="text-slate-900">Kamera QR</strong> atau{' '}
+                    <strong className="text-slate-900">Foto QR</strong> di atas untuk memindai label QR barang.
+                  </span>
+                </div>
+              ) : matchedItem ? (
                 <div className="p-4 bg-slate-50 border border-slate-200 rounded-lg flex items-center gap-4">
                   <QrCodeSvg value={matchedItem.qrCode} size={72} />
                   <div className="text-xs space-y-1">
@@ -533,7 +759,7 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
                 </div>
               ) : (
                 <div className="p-4 bg-red-50 border border-red-200 rounded-lg text-xs text-red-700">
-                  Kode QR tidak ditemukan dalam inventaris. Pastikan kode QR sesuai.
+                  Kode QR <span className="font-mono font-semibold">"{scannedQrCode}"</span> tidak ditemukan dalam inventaris. Pastikan kode QR sesuai.
                 </div>
               )}
             </div>
@@ -740,15 +966,60 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
                   >
                     Verifikasi Scan Kode QR Barang
                   </label>
-                  <input
-                    id="return-qr-verify"
-                    type="text"
-                    value={returnQrInput || activeReturnLoan?.itemQrCode || ''}
-                    onChange={(e) => setReturnQrInput(e.target.value)}
-                    placeholder="Scan Kode QR untuk verifikasi..."
-                    className="w-full px-3 py-2 text-xs font-mono bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-[#0d113a] focus:ring-1 focus:ring-[#0d113a]"
-                  />
+                  <div className="flex flex-wrap gap-2">
+                    <input
+                      id="return-qr-verify"
+                      type="text"
+                      value={returnQrInput || activeReturnLoan?.itemQrCode || ''}
+                      onChange={(e) => setReturnQrInput(e.target.value)}
+                      placeholder="Scan Kode QR untuk verifikasi..."
+                      className="flex-1 min-w-[150px] px-3 py-2 text-xs font-mono bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-[#0d113a] focus:ring-1 focus:ring-[#0d113a]"
+                    />
+                    <button
+                      type="button"
+                      onClick={() =>
+                        cameraTarget === 'return'
+                          ? handleStopCameraScan()
+                          : handleStartCameraScan('return')
+                      }
+                      className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-white bg-[#0d113a] hover:bg-[#151c54] rounded-lg transition-colors whitespace-nowrap shrink-0 shadow-xs"
+                    >
+                      <ScanLine className="w-3.5 h-3.5 text-[#e71f69]" />
+                      {cameraTarget === 'return' ? 'Tutup Kamera' : 'Kamera QR'}
+                    </button>
+                    <label className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-slate-800 bg-slate-100 hover:bg-slate-200 rounded-lg cursor-pointer transition-colors whitespace-nowrap shrink-0">
+                      <Camera className="w-3.5 h-3.5 text-[#e71f69]" />
+                      Foto QR
+                      <input
+                        type="file"
+                        accept="image/*"
+                        capture="environment"
+                        onChange={(e) => handleScanQrFromImageFile(e, 'return')}
+                        className="sr-only"
+                      />
+                    </label>
+                  </div>
                 </div>
+
+                {cameraTarget === 'return' && (
+                  <div className="p-3 bg-slate-900 rounded-lg text-center space-y-2 relative overflow-hidden">
+                    <div className="relative rounded overflow-hidden border border-slate-700 bg-black">
+                      <video
+                        ref={videoRef}
+                        autoPlay
+                        playsInline
+                        muted
+                        className="w-full h-56 object-cover"
+                      />
+                      <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+                        <div className="w-40 h-40 border-2 border-[#e71f69] rounded-lg shadow-[0_0_0_9999px_rgba(0,0,0,0.35)]" />
+                      </div>
+                    </div>
+                    <p className="text-xs text-slate-200">
+                      Arahkan kamera ke Kode QR barang yang dikembalikan...
+                    </p>
+                  </div>
+                )}
 
                 {activeReturnLoan && (
                   <div className="p-4 bg-slate-50 border border-slate-200 rounded-lg space-y-1.5 text-xs">
