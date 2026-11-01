@@ -826,12 +826,24 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
                       return (
                         <tr key={item.id} className="hover:bg-slate-50/80">
                           <td className="py-3 px-4">
-                            <p className="font-semibold text-slate-900">
-                              {item.name}
-                            </p>
-                            <p className="font-mono text-slate-500 mt-0.5 tabular-nums">
-                              {item.qrCode}
-                            </p>
+                            <div className="flex items-center gap-3">
+                              {item.imageUrl && (
+                                <img
+                                  src={item.imageUrl}
+                                  alt={item.name}
+                                  referrerPolicy="no-referrer"
+                                  className="w-11 h-11 rounded-lg object-cover border border-slate-200 shrink-0 bg-slate-100"
+                                />
+                              )}
+                              <div>
+                                <p className="font-semibold text-slate-900">
+                                  {item.name}
+                                </p>
+                                <p className="font-mono text-slate-500 mt-0.5 tabular-nums">
+                                  {item.qrCode}
+                                </p>
+                              </div>
+                            </div>
                           </td>
                           <td className="py-3 px-4 text-slate-600">
                             {item.category} · {item.location}
@@ -990,7 +1002,16 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
                 matchedItem ? (
                   <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-lg flex items-center justify-between gap-3">
                     <div className="flex items-center gap-3">
-                      <QrCodeSvg value={matchedItem.qrCode} size={56} />
+                      {matchedItem.imageUrl ? (
+                        <img
+                          src={matchedItem.imageUrl}
+                          alt={matchedItem.name}
+                          referrerPolicy="no-referrer"
+                          className="w-14 h-14 rounded-lg object-cover border border-slate-200 shrink-0 bg-white"
+                        />
+                      ) : (
+                        <QrCodeSvg value={matchedItem.qrCode} size={56} />
+                      )}
                       <div className="text-xs space-y-0.5">
                         <span className="font-mono font-semibold text-[#e71f69]">
                           TERDETEKSI · {matchedItem.qrCode}
@@ -1103,13 +1124,23 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
                         key={item.id}
                         className="p-3 flex items-center justify-between gap-3 bg-white hover:bg-slate-50/80"
                       >
-                        <div className="min-w-0 flex-1">
-                          <p className="text-xs font-semibold text-slate-900 truncate">
-                            {item.name}
-                          </p>
-                          <p className="text-[11px] font-mono text-slate-500">
-                            {item.qrCode} · Maks {item.availableStock} unit
-                          </p>
+                        <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                          {item.imageUrl && (
+                            <img
+                              src={item.imageUrl}
+                              alt={item.name}
+                              referrerPolicy="no-referrer"
+                              className="w-10 h-10 rounded-lg object-cover border border-slate-200 shrink-0 bg-slate-100"
+                            />
+                          )}
+                          <div className="min-w-0 flex-1">
+                            <p className="text-xs font-semibold text-slate-900 truncate">
+                              {item.name}
+                            </p>
+                            <p className="text-[11px] font-mono text-slate-500">
+                              {item.qrCode} · Maks {item.availableStock} unit
+                            </p>
+                          </div>
                         </div>
 
                         <div className="flex items-center gap-1.5 shrink-0">

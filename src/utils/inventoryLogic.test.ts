@@ -3,13 +3,19 @@ import assert from 'node:assert/strict';
 import {
   authenticateUser,
   buildAutomatedEmailNotifications,
+  buildInventoryExcelTemplateXlsx,
   calculateDueState,
   computeMonthlyLoanReport,
+  formatDateInputLocal,
   generateQrCodeString,
   generateQrMatrix,
   parseBulkInventoryCsv,
+  parseInventoryExcelXlsx,
+  parseLocalEndOfDayIso,
   validateBorrowRequest,
+  validateBulkInventoryRows,
 } from './inventoryLogic';
+import { SAMPLE_BULK_CSV_TEMPLATE, SAMPLE_BULK_TEMPLATE_ROWS } from '../data/seedData';
 import { InventoryItem, LoanRecord, User } from '../types/inventory';
 
 test('generateQrCodeString creates standardized inventory QR code', () => {
@@ -222,4 +228,61 @@ test('authenticateUser verifies credentials and active status', () => {
     authenticateUser(users, 'admin@inventaris.id', 'admin123').user?.role,
     'admin'
   );
+  assert.ok(
+    authenticateUser(users, 'admin@inventaris.id', 'admin123', 'anggota').error
+  );
+  assert.equal(
+    authenticateUser(users, 'admin@inventaris.id', 'admin123', 'admin').user?.id,
+    'U1'
+  );
+});
+
+test('formatDateInputLocal and parseLocalEndOfDayIso preserve local calendar date without shifting', () => {
+  const localDate = new Date(2026, 9, 31, 14, 30, 0); // Oct 31, 2026
+  const formatted = formatDateInputLocal(localDate);
+  assert.equal(formatted, '2026-10-31');
+
+  const endIso = parseLocalEndOfDayIso('2026-11-03');
+  assert.ok(endIso);
+  const parsedBack = new Date(endIso);
+  assert.equal(formatDateInputLocal(parsedBack), '2026-11-03');
+  assert.equal(parseLocalEndOfDayIso(''), '');
+});
+
+test('parseBulkInventoryCsv prevents duplicate QR codes against existing inventory', () => {
+  const csv = `Nama Barang,Kategori,Total Stok,Lokasi,Kondisi,Kode QR
+Kamera A,Fotografi,2,Lemari 1,Baik,INV-DUP-0001
+Kamera B,Fotografi,2,Lemari 1,Baik,INV-DUP-0001`;
+  const res = parseBulkInventoryCsv(csv, 2, ['INV-EXISTING-0001']);
+  assert.equal(res.items.length, 1);
+  assert.equal(res.errors.length, 1);
+});
+
+test('SAMPLE_BULK_CSV_TEMPLATE uses column separation (semicolon + sep=;) instead of commas and includes Gambar Barang', () => {
+  const res = parseBulkInventoryCsv(SAMPLE_BULK_CSV_TEMPLATE, 0);
+  assert.equal(res.errors.length, 0);
+  assert.equal(res.items.length, 3);
+  assert.equal(res.items[0].name, 'Kamera Mirrorless Sony A7 IV');
+  assert.ok(res.items[0].imageUrl?.startsWith('https://'));
+});
+
+test('buildInventoryExcelTemplateXlsx and parseInventoryExcelXlsx round-trip columns and physical image URL', async () => {
+  const xlsxBytes = buildInventoryExcelTemplateXlsx(SAMPLE_BULK_TEMPLATE_ROWS);
+  assert.ok(xlsxBytes.length > 500);
+  // PKZIP signature
+  assert.equal(xlsxBytes[0], 0x50);
+  assert.equal(xlsxBytes[1], 0x4b);
+
+  const parsedRows = await parseInventoryExcelXlsx(xlsxBytes);
+  assert.equal(parsedRows.length, 3);
+  assert.equal(parsedRows[0].name, 'Kamera Mirrorless Sony A7 IV');
+  assert.equal(parsedRows[0].category, 'Fotografi');
+  assert.equal(parsedRows[0].totalStock, '3');
+  assert.equal(parsedRows[0].location, 'Lemari A-01');
+  assert.ok(parsedRows[0].imageUrl?.startsWith('https://'));
+
+  const validated = validateBulkInventoryRows(parsedRows, 0);
+  assert.equal(validated.errors.length, 0);
+  assert.equal(validated.items.length, 3);
+  assert.equal(validated.items[0].imageUrl, SAMPLE_BULK_TEMPLATE_ROWS[0].imageUrl);
 });

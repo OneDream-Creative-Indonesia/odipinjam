@@ -22,7 +22,19 @@ export interface InventoryItem {
   location: string;
   condition: 'Baik' | 'Perlu Perawatan';
   description: string;
+  imageUrl?: string;
   createdAt: string;
+}
+
+export interface BulkInventoryRowInput {
+  name: string;
+  category: string;
+  totalStock: string | number;
+  location: string;
+  condition: string;
+  customQr?: string;
+  description?: string;
+  imageUrl?: string;
 }
 
 export type LoanStatus = 'dipinjam' | 'dikembalikan';

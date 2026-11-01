@@ -405,10 +405,29 @@ export default function App() {
     pushStateToServer({ items: nextItems });
   };
 
-  const handleDeleteItem = (itemId: string) => {
+  const handleEditItem = (updatedItem: InventoryItem) => {
+    const nextItems = items.map((item) =>
+      item.id === updatedItem.id ? updatedItem : item
+    );
+    setItems(nextItems);
+    pushStateToServer({ items: nextItems });
+  };
+
+  const handleDeleteItem = (itemId: string): { ok: boolean; error?: string } => {
+    const hasActiveLoan = loans.some(
+      (l) => l.itemId === itemId && l.status === 'dipinjam'
+    );
+    if (hasActiveLoan) {
+      return {
+        ok: false,
+        error:
+          'Barang tidak dapat dihapus karena sedang dipinjam oleh anggota. Selesaikan pengembalian terlebih dahulu.',
+      };
+    }
     const nextItems = items.filter((i) => i.id !== itemId);
     setItems(nextItems);
     pushStateToServer({ items: nextItems });
+    return { ok: true };
   };
 
   const handleUpdateItemStock = (itemId: string, delta: number) => {
@@ -445,10 +464,21 @@ export default function App() {
     pushStateToServer({ users: nextUsers });
   };
 
-  const handleDeleteUser = (userId: string) => {
+  const handleDeleteUser = (userId: string): { ok: boolean; error?: string } => {
+    const hasActiveLoan = loans.some(
+      (l) => l.userId === userId && l.status === 'dipinjam'
+    );
+    if (hasActiveLoan) {
+      return {
+        ok: false,
+        error:
+          'Akun anggota tidak dapat dihapus karena masih memiliki barang pinjaman aktif.',
+      };
+    }
     const nextUsers = users.filter((u) => u.id !== userId);
     setUsers(nextUsers);
     pushStateToServer({ users: nextUsers });
+    return { ok: true };
   };
 
   const handleBorrowItem = (payload: {
@@ -1064,6 +1094,7 @@ export default function App() {
                   items={items}
                   onAddItem={handleAddItem}
                   onBulkAddItems={handleBulkAddItems}
+                  onEditItem={handleEditItem}
                   onDeleteItem={handleDeleteItem}
                   onUpdateItemStock={handleUpdateItemStock}
                   onInspectQr={(item) => setInspectedQrItem(item)}

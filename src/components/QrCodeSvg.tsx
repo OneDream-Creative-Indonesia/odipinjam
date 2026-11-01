@@ -132,6 +132,16 @@ export const QrLabelModal: React.FC<QrLabelModalProps> = ({ item, onClose }) => 
               ODipinjam · Kartu Pelacakan Aset
             </span>
           </div>
+          {item.imageUrl && (
+            <div className="w-28 h-20 mb-3 rounded-lg overflow-hidden border border-slate-200 bg-white">
+              <img
+                src={item.imageUrl}
+                alt={item.name}
+                referrerPolicy="no-referrer"
+                className="w-full h-full object-cover"
+              />
+            </div>
+          )}
           <QrCodeSvg value={item.qrCode} size={180} className="shadow-xs" />
           <p className="mt-4 font-mono text-base font-semibold text-slate-900 tabular-nums">
             {item.qrCode}

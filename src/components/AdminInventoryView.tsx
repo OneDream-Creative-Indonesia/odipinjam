@@ -1,35 +1,125 @@
 import React, { useMemo, useState } from 'react';
-import { InventoryItem } from '../types/inventory';
+import { BulkInventoryRowInput, InventoryItem } from '../types/inventory';
 import {
+  buildInventoryExcelTemplateXlsx,
   generateQrCodeString,
-  parseBulkInventoryCsv,
+  parseInventoryExcelXlsx,
+  parseSpreadsheetTextToRows,
+  validateBulkInventoryRows,
 } from '../utils/inventoryLogic';
-import { SAMPLE_BULK_CSV_TEMPLATE } from '../data/seedData';
+import {
+  createSampleItemIllustrationSvg,
+  SAMPLE_BULK_CSV_TEMPLATE,
+  SAMPLE_BULK_TEMPLATE_ROWS,
+} from '../data/seedData';
 import { QrCodeSvg } from './QrCodeSvg';
 import {
   CheckCircle2,
   Download,
   FileSpreadsheet,
+  Image as ImageIcon,
+  Pencil,
   Plus,
   QrCode,
   Search,
+  Sparkles,
   Trash2,
   Upload,
+  X,
 } from 'lucide-react';
 
 interface AdminInventoryViewProps {
   items: InventoryItem[];
   onAddItem: (newItem: Omit<InventoryItem, 'id' | 'createdAt'>) => void;
   onBulkAddItems: (newItems: Omit<InventoryItem, 'id' | 'createdAt'>[]) => void;
-  onDeleteItem: (itemId: string) => void;
+  onEditItem: (updatedItem: InventoryItem) => void;
+  onDeleteItem: (itemId: string) => { ok: boolean; error?: string };
   onUpdateItemStock: (itemId: string, delta: number) => void;
   onInspectQr: (item: InventoryItem) => void;
+}
+
+interface EditableBulkRow extends BulkInventoryRowInput {
+  rowId: string;
+}
+
+function createEmptyBulkRow(index = 0): EditableBulkRow {
+  return {
+    rowId: `row-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 7)}`,
+    name: '',
+    category: '',
+    totalStock: '1',
+    location: '',
+    condition: 'Baik',
+    customQr: '',
+    description: '',
+    imageUrl: '',
+  };
+}
+
+/**
+ * Reads an uploaded image file and compresses/resizes raster images via Canvas
+ * so physical item photos stay crisp while fitting comfortably in localStorage.
+ */
+function readAndCompressImageFile(
+  file: File,
+  maxDimension = 800,
+  quality = 0.82
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('Gagal membaca file gambar.'));
+    reader.onload = (evt) => {
+      const rawDataUrl = String(evt.target?.result || '');
+      if (!rawDataUrl.startsWith('data:image/')) {
+        reject(new Error('Format file bukan gambar yang valid.'));
+        return;
+      }
+      if (rawDataUrl.startsWith('data:image/svg+xml')) {
+        resolve(rawDataUrl);
+        return;
+      }
+      const img = new Image();
+      img.onload = () => {
+        try {
+          let { width, height } = img;
+          if (width > maxDimension || height > maxDimension) {
+            if (width >= height) {
+              height = Math.round((height * maxDimension) / width);
+              width = maxDimension;
+            } else {
+              width = Math.round((width * maxDimension) / height);
+              height = maxDimension;
+            }
+          }
+          const canvas = document.createElement('canvas');
+          canvas.width = Math.max(1, width);
+          canvas.height = Math.max(1, height);
+          const ctx = canvas.getContext('2d');
+          if (!ctx) {
+            resolve(rawDataUrl);
+            return;
+          }
+          ctx.fillStyle = '#ffffff';
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          const compressed = canvas.toDataURL('image/jpeg', quality);
+          resolve(compressed.length < rawDataUrl.length ? compressed : rawDataUrl);
+        } catch {
+          resolve(rawDataUrl);
+        }
+      };
+      img.onerror = () => resolve(rawDataUrl);
+      img.src = rawDataUrl;
+    };
+    reader.readAsDataURL(file);
+  });
 }
 
 export const AdminInventoryView: React.FC<AdminInventoryViewProps> = ({
   items,
   onAddItem,
   onBulkAddItems,
+  onEditItem,
   onDeleteItem,
   onUpdateItemStock,
   onInspectQr,
@@ -42,13 +132,44 @@ export const AdminInventoryView: React.FC<AdminInventoryViewProps> = ({
   const [condition, setCondition] = useState<'Baik' | 'Perlu Perawatan'>('Baik');
   const [customQr, setCustomQr] = useState('');
   const [description, setDescription] = useState('');
+  const [itemImageUrl, setItemImageUrl] = useState('');
   const [formError, setFormError] = useState<string | null>(null);
   const [formSuccess, setFormSuccess] = useState<string | null>(null);
+  const [tableActionMessage, setTableActionMessage] = useState<{
+    type: 'success' | 'error';
+    text: string;
+  } | null>(null);
 
-  // Bulk import state
+  // Edit Item Modal state
+  const [editingItem, setEditingItem] = useState<InventoryItem | null>(null);
+  const [editName, setEditName] = useState('');
+  const [editCategory, setEditCategory] = useState('');
+  const [editTotalStock, setEditTotalStock] = useState('1');
+  const [editLocation, setEditLocation] = useState('');
+  const [editCondition, setEditCondition] = useState<
+    'Baik' | 'Perlu Perawatan'
+  >('Baik');
+  const [editDescription, setEditDescription] = useState('');
+  const [editImageUrl, setEditImageUrl] = useState('');
+  const [editError, setEditError] = useState<string | null>(null);
+
+  // Lightbox preview modal for physical item image
+  const [previewImageItem, setPreviewImageItem] = useState<{
+    name: string;
+    qrCode: string;
+    imageUrl: string;
+  } | null>(null);
+
+  // Bulk import state (column-by-column rows instead of comma-separated text)
   const [showBulkPanel, setShowBulkPanel] = useState(false);
-  const [bulkText, setBulkText] = useState('');
+  const [bulkRows, setBulkRows] = useState<EditableBulkRow[]>(() =>
+    SAMPLE_BULK_TEMPLATE_ROWS.map((r, idx) => ({
+      ...r,
+      rowId: `sample-init-${idx}`,
+    }))
+  );
   const [bulkFileName, setBulkFileName] = useState<string | null>(null);
+  const [bulkUploadError, setBulkUploadError] = useState<string | null>(null);
   const [bulkSuccessMessage, setBulkSuccessMessage] = useState<string | null>(
     null
   );
@@ -59,16 +180,32 @@ export const AdminInventoryView: React.FC<AdminInventoryViewProps> = ({
 
   const previewQrCode = useMemo(() => {
     if (customQr.trim()) return customQr.trim().toUpperCase();
-    return generateQrCodeString(
+    const existingSet = new Set(items.map((i) => i.qrCode.toLowerCase()));
+    let seq = items.length + 1;
+    let candidate = generateQrCodeString(
       name || 'BARANG',
       category || 'INV',
-      items.length + 1
+      seq
     );
-  }, [name, category, customQr, items.length]);
+    while (existingSet.has(candidate.toLowerCase())) {
+      seq++;
+      candidate = generateQrCodeString(
+        name || 'BARANG',
+        category || 'INV',
+        seq
+      );
+    }
+    return candidate;
+  }, [name, category, customQr, items]);
 
   const parsedBulkPreview = useMemo(
-    () => parseBulkInventoryCsv(bulkText, items.length),
-    [bulkText, items.length]
+    () =>
+      validateBulkInventoryRows(
+        bulkRows,
+        items.length,
+        items.map((i) => i.qrCode)
+      ),
+    [bulkRows, items]
   );
 
   const categories = useMemo(() => {
@@ -91,6 +228,48 @@ export const AdminInventoryView: React.FC<AdminInventoryViewProps> = ({
       );
     });
   }, [items, selectedCategory, searchQuery]);
+
+  const handleSingleImageUpload = async (
+    e: React.ChangeEvent<HTMLInputElement>
+  ) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const dataUrl = await readAndCompressImageFile(file);
+      setItemImageUrl(dataUrl);
+      setFormError(null);
+    } catch (err) {
+      setFormError(
+        err instanceof Error ? err.message : 'Gagal memuat gambar barang.'
+      );
+    }
+    e.target.value = '';
+  };
+
+  const handleGenerateSingleSamplePhoto = () => {
+    const svgDataUrl = createSampleItemIllustrationSvg({
+      name: name.trim() || 'Barang Inventaris',
+      category: category.trim() || 'Umum',
+    });
+    setItemImageUrl(svgDataUrl);
+  };
+
+  const handleEditImageUpload = async (
+    e: React.ChangeEvent<HTMLInputElement>
+  ) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const dataUrl = await readAndCompressImageFile(file);
+      setEditImageUrl(dataUrl);
+      setEditError(null);
+    } catch (err) {
+      setEditError(
+        err instanceof Error ? err.message : 'Gagal memuat gambar barang.'
+      );
+    }
+    e.target.value = '';
+  };
 
   const handleCreateItem = (e: React.FormEvent) => {
     e.preventDefault();
@@ -128,37 +307,262 @@ export const AdminInventoryView: React.FC<AdminInventoryViewProps> = ({
       description:
         description.trim() ||
         `Unit inventaris ${cleanName} (${category.trim() || 'Umum'})`,
+      ...(itemImageUrl.trim() ? { imageUrl: itemImageUrl.trim() } : {}),
     });
 
     setFormSuccess(
       `Barang "${cleanName}" berhasil didaftarkan dengan Kode QR ${finalQr}.`
     );
     setName('');
+    setCategory('');
+    setLocation('');
+    setCondition('Baik');
     setCustomQr('');
     setDescription('');
-    setTotalStock('2');
+    setItemImageUrl('');
+    setTotalStock('1');
   };
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleOpenEditModal = (item: InventoryItem) => {
+    setEditingItem(item);
+    setEditName(item.name);
+    setEditCategory(item.category);
+    setEditTotalStock(String(item.totalStock));
+    setEditLocation(item.location);
+    setEditCondition(item.condition);
+    setEditDescription(item.description);
+    setEditImageUrl(item.imageUrl || '');
+    setEditError(null);
+  };
+
+  const handleSaveEditItem = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingItem) return;
+    setEditError(null);
+
+    const cleanName = editName.trim();
+    if (!cleanName) {
+      setEditError('Nama barang wajib diisi.');
+      return;
+    }
+
+    const borrowed = Math.max(
+      0,
+      editingItem.totalStock - editingItem.availableStock
+    );
+    const minTotal = Math.max(1, borrowed);
+    const parsedTotal = Number.parseInt(editTotalStock, 10);
+    if (Number.isNaN(parsedTotal) || parsedTotal < minTotal) {
+      setEditError(
+        borrowed > 0
+          ? `Total stok minimal ${minTotal} unit (karena ${borrowed} unit sedang dipinjam).`
+          : 'Total stok minimal 1 unit.'
+      );
+      return;
+    }
+
+    onEditItem({
+      ...editingItem,
+      name: cleanName,
+      category: editCategory.trim() || 'Umum',
+      totalStock: parsedTotal,
+      availableStock: Math.max(0, parsedTotal - borrowed),
+      location: editLocation.trim() || 'Gudang Utama',
+      condition: editCondition,
+      description:
+        editDescription.trim() ||
+        `Unit inventaris ${cleanName} (${editCategory.trim() || 'Umum'})`,
+      imageUrl: editImageUrl.trim() || undefined,
+    });
+
+    setEditingItem(null);
+    setTableActionMessage({
+      type: 'success',
+      text: `Data barang "${cleanName}" berhasil diperbarui.`,
+    });
+    setTimeout(() => setTableActionMessage(null), 4000);
+  };
+
+  const handleDeleteClick = (item: InventoryItem) => {
+    const res = onDeleteItem(item.id);
+    if (!res.ok) {
+      setTableActionMessage({
+        type: 'error',
+        text: res.error || 'Gagal menghapus barang.',
+      });
+    } else {
+      setTableActionMessage({
+        type: 'success',
+        text: `Barang "${item.name}" (${item.qrCode}) telah dihapus.`,
+      });
+    }
+    setTimeout(() => setTableActionMessage(null), 4500);
+  };
+
+  // Bulk row handlers
+  const handleUpdateBulkRow = (
+    rowId: string,
+    field: keyof BulkInventoryRowInput,
+    value: string
+  ) => {
+    setBulkRows((prev) =>
+      prev.map((r) => (r.rowId === rowId ? { ...r, [field]: value } : r))
+    );
+  };
+
+  const handleBulkRowImageUpload = async (
+    rowId: string,
+    e: React.ChangeEvent<HTMLInputElement>
+  ) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const dataUrl = await readAndCompressImageFile(file);
+      handleUpdateBulkRow(rowId, 'imageUrl', dataUrl);
+      setBulkUploadError(null);
+    } catch (err) {
+      setBulkUploadError(
+        err instanceof Error ? err.message : 'Gagal membaca file gambar.'
+      );
+    }
+    e.target.value = '';
+  };
+
+  const handleAddBulkRow = () => {
+    setBulkRows((prev) => [...prev, createEmptyBulkRow(prev.length + 1)]);
+  };
+
+  const handleRemoveBulkRow = (rowId: string) => {
+    setBulkRows((prev) => {
+      const next = prev.filter((r) => r.rowId !== rowId);
+      return next.length > 0 ? next : [createEmptyBulkRow(1)];
+    });
+  };
+
+  const handleLoadSampleRows = () => {
+    setBulkRows(
+      SAMPLE_BULK_TEMPLATE_ROWS.map((r, idx) => ({
+        ...r,
+        rowId: `sample-${Date.now()}-${idx}`,
+      }))
+    );
+    setBulkFileName(null);
+    setBulkUploadError(null);
+  };
+
+  const handleClearBulkRows = () => {
+    setBulkRows([
+      createEmptyBulkRow(1),
+      createEmptyBulkRow(2),
+      createEmptyBulkRow(3),
+    ]);
+    setBulkFileName(null);
+    setBulkUploadError(null);
+  };
+
+  // Handle pasting multi-column cells directly from Excel / Google Sheets into any table input
+  const handleBulkTablePaste = (e: React.ClipboardEvent<HTMLTableSectionElement>) => {
+    const pastedText = e.clipboardData?.getData('text/plain') || '';
+    if (!pastedText.includes('\t') && !pastedText.includes('\n')) {
+      return; // Normal single-cell paste
+    }
+    const parsedRows = parseSpreadsheetTextToRows(pastedText);
+    if (parsedRows.length === 0) return;
+
+    e.preventDefault();
+    setBulkRows(
+      parsedRows.map((r, idx) => ({
+        ...r,
+        rowId: `paste-${Date.now()}-${idx}`,
+      }))
+    );
+    setBulkFileName('Data ditempel dari Spreadsheet / Excel');
+    setBulkUploadError(null);
+  };
+
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     setBulkFileName(file.name);
-    const reader = new FileReader();
-    reader.onload = (evt) => {
-      const content = String(evt.target?.result || '');
-      setBulkText(content);
-    };
-    reader.readAsText(file);
+    setBulkUploadError(null);
+
+    try {
+      const buffer = await file.arrayBuffer();
+      const bytes = new Uint8Array(buffer);
+      const isZipXlsx =
+        file.name.toLowerCase().endsWith('.xlsx') ||
+        (bytes.length > 4 &&
+          bytes[0] === 0x50 &&
+          bytes[1] === 0x4b &&
+          bytes[2] === 0x03 &&
+          bytes[3] === 0x04);
+
+      if (isZipXlsx) {
+        const rows = await parseInventoryExcelXlsx(bytes);
+        if (rows.length === 0) {
+          setBulkUploadError(
+            'File Excel (.xlsx) tidak berisi baris data barang.'
+          );
+        } else {
+          setBulkRows(
+            rows.map((r, idx) => ({
+              ...r,
+              rowId: `xlsx-${Date.now()}-${idx}`,
+            }))
+          );
+        }
+      } else {
+        const text = new TextDecoder('utf-8').decode(bytes);
+        const rows = parseSpreadsheetTextToRows(text);
+        if (rows.length === 0) {
+          setBulkUploadError(
+            'File tidak berisi baris data barang yang valid.'
+          );
+        } else {
+          setBulkRows(
+            rows.map((r, idx) => ({
+              ...r,
+              rowId: `csv-${Date.now()}-${idx}`,
+            }))
+          );
+        }
+      }
+    } catch (err) {
+      setBulkUploadError(
+        err instanceof Error
+          ? err.message
+          : 'Gagal membaca file template. Pastikan format .xlsx atau .csv sesuai.'
+      );
+    }
+    e.target.value = '';
   };
 
-  const handleDownloadTemplate = () => {
-    const blob = new Blob([SAMPLE_BULK_CSV_TEMPLATE], {
+  const handleDownloadExcelTemplate = () => {
+    const xlsxBytes = buildInventoryExcelTemplateXlsx(
+      SAMPLE_BULK_TEMPLATE_ROWS
+    );
+    const blob = new Blob([xlsxBytes as unknown as BlobPart], {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'Template-Import-Inventaris.xlsx';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const handleDownloadCsvTemplate = () => {
+    const bom = '\uFEFF';
+    const blob = new Blob([bom + SAMPLE_BULK_CSV_TEMPLATE], {
       type: 'text/csv;charset=utf-8;',
     });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'Template-Bulk-Import-Inventaris.csv';
+    a.download = 'Template-Import-Inventaris-Kolom.csv';
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -167,9 +571,17 @@ export const AdminInventoryView: React.FC<AdminInventoryViewProps> = ({
 
   const handleConfirmBulkImport = () => {
     if (parsedBulkPreview.items.length === 0) return;
+    const importedCount = parsedBulkPreview.items.length;
     onBulkAddItems(parsedBulkPreview.items);
+    setBulkRows([
+      createEmptyBulkRow(1),
+      createEmptyBulkRow(2),
+      createEmptyBulkRow(3),
+    ]);
+    setBulkFileName(null);
+    setBulkUploadError(null);
     setBulkSuccessMessage(
-      `${parsedBulkPreview.items.length} barang baru berhasil diimpor beserta Kode QR otomatis.`
+      `${importedCount} barang baru berhasil diimpor beserta gambar fisik dan Kode QR otomatis.`
     );
     setTimeout(() => setBulkSuccessMessage(null), 5000);
   };
@@ -180,8 +592,11 @@ export const AdminInventoryView: React.FC<AdminInventoryViewProps> = ({
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h2 className="text-lg font-semibold text-slate-900">
-            Inventaris Barang
+            Manajemen Inventaris, Foto Fisik & Generator Kode QR
           </h2>
+          <p className="text-xs text-slate-500 mt-0.5">
+            Daftarkan barang baru beserta foto fisik barang & Kode QR otomatis, atau gunakan Template Import berbasis kolom terpisah
+          </p>
         </div>
 
         <button
@@ -191,41 +606,51 @@ export const AdminInventoryView: React.FC<AdminInventoryViewProps> = ({
         >
           <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
           {showBulkPanel
-            ? 'Tutup Panel Bulk Import'
-            : 'Bulk Import Barang (Excel / CSV)'}
+            ? 'Tutup Panel Import Kolom / Excel'
+            : 'Bulk Import Barang (Template Kolom / Excel)'}
         </button>
       </div>
 
-      {/* Bulk Import Excel / CSV Panel */}
+      {/* Bulk Import Excel / Column-by-Column Panel */}
       {showBulkPanel && (
         <section
-          aria-label="Bulk Import Daftar Barang"
+          aria-label="Bulk Import Daftar Barang Berbasis Kolom"
           className="bg-white border border-slate-200 rounded-lg p-6 space-y-5"
         >
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-slate-200">
+          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 pb-4 border-b border-slate-200">
             <div>
               <h3 className="text-sm font-semibold text-slate-900">
-                Bulk Import Daftar Barang (Unggah File CSV / Excel)
+                Template & Tabel Import Inventaris Barang (Kolom Terpisah + Gambar Fisik)
               </h3>
               <p className="text-xs text-slate-500 mt-0.5">
-                Format kolom: Nama Barang, Kategori, Total Stok, Lokasi, Kondisi, Kode QR (Opsional), Deskripsi
+                Setiap data diisi pada <strong>kolom masing-masing</strong> (tanpa pemisah koma). Anda dapat mengunduh Template Excel (<code>.xlsx</code>), mengisi kolom di Excel lalu mengunggahnya, atau mengisi langsung pada tabel kolom di bawah beserta foto fisik barang.
               </p>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <button
                 type="button"
-                onClick={handleDownloadTemplate}
+                onClick={handleDownloadExcelTemplate}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-lg transition-colors whitespace-nowrap shrink-0"
+              >
+                <Download className="w-3.5 h-3.5" />
+                Unduh Template Excel (.xlsx)
+              </button>
+              <button
+                type="button"
+                onClick={handleDownloadCsvTemplate}
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors whitespace-nowrap shrink-0"
               >
                 <Download className="w-3.5 h-3.5" />
-                Unduh Template CSV
+                Template CSV (Kolom Excel)
               </button>
-              <label className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium text-white bg-[#e71f69] hover:bg-[#cf165b] rounded-lg cursor-pointer transition-colors whitespace-nowrap shrink-0 shadow-xs">
+              <label className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium text-white bg-sky-600 hover:bg-sky-700 rounded-lg cursor-pointer transition-colors whitespace-nowrap shrink-0">
                 <Upload className="w-3.5 h-3.5" />
-                Pilih File CSV / Excel (.csv, .tsv)
+                Unggah File Excel / Template (.xlsx, .csv)
                 <input
+                  id="bulk-file-input"
+                  name="bulkFile"
                   type="file"
-                  accept=".csv,.tsv,.txt,text/csv,application/vnd.ms-excel"
+                  accept=".xlsx,.xls,.csv,.tsv,.txt,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/csv"
                   onChange={handleFileUpload}
                   className="sr-only"
                 />
@@ -233,110 +658,357 @@ export const AdminInventoryView: React.FC<AdminInventoryViewProps> = ({
             </div>
           </div>
 
+          {/* Toolbar for Table Actions */}
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={handleAddBulkRow}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-800 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                Tambah Baris Kolom
+              </button>
+              <button
+                type="button"
+                onClick={handleLoadSampleRows}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors"
+              >
+                Isi Contoh Data
+              </button>
+              <button
+                type="button"
+                onClick={handleClearBulkRows}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-600 hover:text-red-600 bg-slate-50 hover:bg-red-50 rounded-lg transition-colors"
+              >
+                Kosongkan Baris
+              </button>
+            </div>
+
+            <div className="text-xs text-slate-500">
+              Tips: Anda juga dapat menyalin (Copy) sel langsung dari Excel lalu tempel (<strong>Ctrl+V / Cmd+V</strong>) pada kolom tabel di bawah.
+            </div>
+          </div>
+
           {bulkFileName && (
-            <p className="text-xs text-[#e71f69] font-medium">
-              File dimuat: {bulkFileName}
+            <p className="text-xs text-sky-700 font-medium bg-sky-50 border border-sky-200 rounded-lg px-3 py-2">
+              Sumber data dimuat ke dalam kolom: <strong>{bulkFileName}</strong>
             </p>
           )}
 
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            <div>
-              <label
-                htmlFor="bulk-csv-textarea"
-                className="block text-xs font-medium text-slate-700 mb-1.5"
+          {bulkUploadError && (
+            <p className="text-xs text-red-600 font-medium bg-red-50 border border-red-200 rounded-lg px-3 py-2">
+              {bulkUploadError}
+            </p>
+          )}
+
+          {/* Column-by-Column Editable Spreadsheet Grid */}
+          <div className="border border-slate-200 rounded-lg overflow-x-auto">
+            <table className="w-full text-left border-collapse text-xs min-w-[1080px]">
+              <thead>
+                <tr className="bg-slate-900 text-white font-medium">
+                  <th className="py-2.5 px-2.5 w-10 text-center">No</th>
+                  <th className="py-2.5 px-3 w-52">Gambar Fisik Barang</th>
+                  <th className="py-2.5 px-3 w-48">Nama Barang *</th>
+                  <th className="py-2.5 px-3 w-32">Kategori</th>
+                  <th className="py-2.5 px-3 w-24">Total Stok *</th>
+                  <th className="py-2.5 px-3 w-36">Lokasi</th>
+                  <th className="py-2.5 px-3 w-36">Kondisi</th>
+                  <th className="py-2.5 px-3 w-36">Kode QR (Opsional)</th>
+                  <th className="py-2.5 px-3">Deskripsi / Spesifikasi</th>
+                  <th className="py-2.5 px-2.5 w-10 text-center">Hapus</th>
+                </tr>
+              </thead>
+              <tbody
+                onPaste={handleBulkTablePaste}
+                className="divide-y divide-slate-200 bg-white"
               >
-                Data CSV / Salinan Baris Spreadsheet Excel
-              </label>
-              <textarea
-                id="bulk-csv-textarea"
-                rows={7}
-                value={bulkText}
-                onChange={(e) => setBulkText(e.target.value)}
-                className="w-full p-3 text-xs font-mono bg-slate-50 border border-slate-200 rounded-lg text-slate-800 focus:outline-none focus:border-[#0d113a] focus:ring-1 focus:ring-[#0d113a]"
-                placeholder="Nama Barang,Kategori,Total Stok,Lokasi,Kondisi"
-              />
-              {parsedBulkPreview.errors.length > 0 && (
-                <div className="mt-2 space-y-1">
-                  {parsedBulkPreview.errors.map((err, idx) => (
-                    <p key={idx} className="text-xs text-red-600">
-                      {err}
-                    </p>
-                  ))}
-                </div>
-              )}
-            </div>
+                {bulkRows.map((row, idx) => {
+                  const autoQrPreview = generateQrCodeString(
+                    row.name || 'BARANG',
+                    row.category || 'UMU',
+                    items.length + idx + 1
+                  );
+                  return (
+                    <tr key={row.rowId} className="hover:bg-slate-50/70 align-top">
+                      <td className="py-2.5 px-2.5 text-center font-mono text-slate-500 pt-4">
+                        {idx + 1}
+                      </td>
 
-            <div className="flex flex-col justify-between">
-              <div>
-                <span className="block text-xs font-medium text-slate-700 mb-1.5">
-                  Pratinjau Barang yang Akan Diimpor ({parsedBulkPreview.items.length}{' '}
-                  baris valid)
-                </span>
-                <div className="border border-slate-200 rounded-lg overflow-hidden max-h-44 overflow-y-auto">
-                  <table className="w-full text-left border-collapse text-xs">
-                    <thead>
-                      <tr className="bg-slate-50 border-b border-slate-200 text-slate-500">
-                        <th className="py-2 px-3">Kode QR</th>
-                        <th className="py-2 px-3">Nama Barang</th>
-                        <th className="py-2 px-3">Kategori</th>
-                        <th className="py-2 px-3 text-right">Stok</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-200">
-                      {parsedBulkPreview.items.map((it, idx) => (
-                        <tr key={idx}>
-                          <td className="py-2 px-3 font-mono text-slate-700 tabular-nums">
-                            {it.qrCode}
-                          </td>
-                          <td className="py-2 px-3 font-medium text-slate-900">
-                            {it.name}
-                          </td>
-                          <td className="py-2 px-3 text-slate-600">
-                            {it.category}
-                          </td>
-                          <td className="py-2 px-3 text-right font-mono tabular-nums">
-                            {it.totalStock}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
+                      {/* Kolom Gambar Fisik Barang */}
+                      <td className="py-2.5 px-3">
+                        <div className="flex items-start gap-2">
+                          {row.imageUrl ? (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setPreviewImageItem({
+                                  name: row.name || `Baris ${idx + 1}`,
+                                  qrCode: row.customQr || autoQrPreview,
+                                  imageUrl: row.imageUrl || '',
+                                })
+                              }
+                              title="Klik untuk memperbesar gambar"
+                              className="w-11 h-11 rounded-lg border border-slate-200 overflow-hidden shrink-0 bg-slate-100 relative group"
+                            >
+                              <img
+                                src={row.imageUrl}
+                                alt={row.name || 'Pratinjau barang'}
+                                referrerPolicy="no-referrer"
+                                className="w-full h-full object-cover"
+                              />
+                            </button>
+                          ) : (
+                            <div className="w-11 h-11 rounded-lg border border-dashed border-slate-300 bg-slate-50 flex items-center justify-center shrink-0 text-slate-400">
+                              <ImageIcon className="w-4 h-4" />
+                            </div>
+                          )}
 
-              <div className="pt-4 flex items-center justify-between gap-3">
-                {bulkSuccessMessage ? (
-                  <span className="inline-flex items-center gap-1.5 text-xs font-medium text-emerald-700">
-                    <CheckCircle2 className="w-4 h-4" />
-                    {bulkSuccessMessage}
-                  </span>
-                ) : (
-                  <span className="text-xs text-slate-500">
-                    Kode QR dibuat otomatis jika kolom Kode QR dikosongkan.
-                  </span>
-                )}
-                <button
-                  type="button"
-                  disabled={parsedBulkPreview.items.length === 0}
-                  onClick={handleConfirmBulkImport}
-                  className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium text-white bg-[#0d113a] hover:bg-[#151c54] disabled:opacity-40 rounded-lg transition-colors whitespace-nowrap shrink-0 shadow-xs"
-                >
-                  <Plus className="w-3.5 h-3.5" />
-                  Impor {parsedBulkPreview.items.length} Barang Sekarang
-                </button>
-              </div>
+                          <div className="flex-1 min-w-0 space-y-1">
+                            <div className="flex items-center gap-1">
+                              <label className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-sky-700 bg-sky-50 hover:bg-sky-100 border border-sky-200 rounded cursor-pointer transition-colors whitespace-nowrap">
+                                <Upload className="w-3 h-3" />
+                                Pilih Foto
+                                <input
+                                  type="file"
+                                  accept="image/*"
+                                  onChange={(e) =>
+                                    handleBulkRowImageUpload(row.rowId, e)
+                                  }
+                                  className="sr-only"
+                                />
+                              </label>
+                              {row.imageUrl && (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    handleUpdateBulkRow(row.rowId, 'imageUrl', '')
+                                  }
+                                  aria-label="Hapus gambar baris ini"
+                                  className="p-1 text-slate-400 hover:text-red-600 rounded"
+                                >
+                                  <X className="w-3.5 h-3.5" />
+                                </button>
+                              )}
+                            </div>
+                            <input
+                              type="text"
+                              value={
+                                row.imageUrl?.startsWith('data:image/')
+                                  ? ''
+                                  : row.imageUrl || ''
+                              }
+                              onChange={(e) =>
+                                handleUpdateBulkRow(
+                                  row.rowId,
+                                  'imageUrl',
+                                  e.target.value
+                                )
+                              }
+                              placeholder={
+                                row.imageUrl?.startsWith('data:image/')
+                                  ? 'File foto terlampir'
+                                  : 'Atau tempel URL foto...'
+                              }
+                              aria-label={`URL Gambar baris ${idx + 1}`}
+                              className="w-full px-2 py-1 text-[11px] bg-slate-50 border border-slate-200 rounded text-slate-800 focus:outline-none focus:border-sky-600"
+                            />
+                          </div>
+                        </div>
+                      </td>
+
+                      {/* Kolom Nama Barang */}
+                      <td className="py-2.5 px-2.5">
+                        <input
+                          type="text"
+                          value={row.name}
+                          onChange={(e) =>
+                            handleUpdateBulkRow(row.rowId, 'name', e.target.value)
+                          }
+                          placeholder="Nama barang..."
+                          aria-label={`Nama Barang baris ${idx + 1}`}
+                          className="w-full px-2.5 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-md text-slate-900 focus:outline-none focus:border-sky-600"
+                        />
+                      </td>
+
+                      {/* Kolom Kategori */}
+                      <td className="py-2.5 px-2.5">
+                        <input
+                          type="text"
+                          value={row.category}
+                          onChange={(e) =>
+                            handleUpdateBulkRow(
+                              row.rowId,
+                              'category',
+                              e.target.value
+                            )
+                          }
+                          placeholder="Umum / Audio..."
+                          aria-label={`Kategori baris ${idx + 1}`}
+                          className="w-full px-2.5 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-md text-slate-900 focus:outline-none focus:border-sky-600"
+                        />
+                      </td>
+
+                      {/* Kolom Total Stok */}
+                      <td className="py-2.5 px-2.5">
+                        <input
+                          type="number"
+                          min={1}
+                          value={row.totalStock}
+                          onChange={(e) =>
+                            handleUpdateBulkRow(
+                              row.rowId,
+                              'totalStock',
+                              e.target.value
+                            )
+                          }
+                          aria-label={`Total Stok baris ${idx + 1}`}
+                          className="w-full px-2.5 py-1.5 text-xs font-mono bg-slate-50 border border-slate-200 rounded-md text-slate-900 focus:outline-none focus:border-sky-600"
+                        />
+                      </td>
+
+                      {/* Kolom Lokasi */}
+                      <td className="py-2.5 px-2.5">
+                        <input
+                          type="text"
+                          value={row.location}
+                          onChange={(e) =>
+                            handleUpdateBulkRow(
+                              row.rowId,
+                              'location',
+                              e.target.value
+                            )
+                          }
+                          placeholder="Lemari A-01"
+                          aria-label={`Lokasi baris ${idx + 1}`}
+                          className="w-full px-2.5 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-md text-slate-900 focus:outline-none focus:border-sky-600"
+                        />
+                      </td>
+
+                      {/* Kolom Kondisi */}
+                      <td className="py-2.5 px-2.5">
+                        <select
+                          value={
+                            String(row.condition)
+                              .toLowerCase()
+                              .includes('rawat')
+                              ? 'Perlu Perawatan'
+                              : 'Baik'
+                          }
+                          onChange={(e) =>
+                            handleUpdateBulkRow(
+                              row.rowId,
+                              'condition',
+                              e.target.value
+                            )
+                          }
+                          aria-label={`Kondisi baris ${idx + 1}`}
+                          className="w-full px-2 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-md text-slate-900 focus:outline-none focus:border-sky-600"
+                        >
+                          <option value="Baik">Baik</option>
+                          <option value="Perlu Perawatan">Perlu Perawatan</option>
+                        </select>
+                      </td>
+
+                      {/* Kolom Kode QR */}
+                      <td className="py-2.5 px-2.5">
+                        <input
+                          type="text"
+                          value={row.customQr || ''}
+                          onChange={(e) =>
+                            handleUpdateBulkRow(
+                              row.rowId,
+                              'customQr',
+                              e.target.value
+                            )
+                          }
+                          placeholder={autoQrPreview}
+                          aria-label={`Kode QR baris ${idx + 1}`}
+                          className="w-full px-2.5 py-1.5 text-xs font-mono bg-slate-50 border border-slate-200 rounded-md text-slate-900 focus:outline-none focus:border-sky-600"
+                        />
+                      </td>
+
+                      {/* Kolom Deskripsi */}
+                      <td className="py-2.5 px-2.5">
+                        <input
+                          type="text"
+                          value={row.description || ''}
+                          onChange={(e) =>
+                            handleUpdateBulkRow(
+                              row.rowId,
+                              'description',
+                              e.target.value
+                            )
+                          }
+                          placeholder="Kelengkapan / spesifikasi..."
+                          aria-label={`Deskripsi baris ${idx + 1}`}
+                          className="w-full px-2.5 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-md text-slate-900 focus:outline-none focus:border-sky-600"
+                        />
+                      </td>
+
+                      {/* Hapus Baris */}
+                      <td className="py-2.5 px-2.5 text-center pt-3">
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveBulkRow(row.rowId)}
+                          aria-label={`Hapus baris ${idx + 1}`}
+                          className="p-1.5 text-slate-400 hover:text-red-600 rounded hover:bg-red-50 transition-colors"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          {parsedBulkPreview.errors.length > 0 && (
+            <div className="p-3 bg-red-50 border border-red-200 rounded-lg space-y-1">
+              {parsedBulkPreview.errors.map((err, idx) => (
+                <p key={idx} className="text-xs text-red-600 font-medium">
+                  {err}
+                </p>
+              ))}
             </div>
+          )}
+
+          <div className="pt-2 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            {bulkSuccessMessage ? (
+              <span className="inline-flex items-center gap-1.5 text-xs font-medium text-emerald-700">
+                <CheckCircle2 className="w-4 h-4" />
+                {bulkSuccessMessage}
+              </span>
+            ) : (
+              <span className="text-xs text-slate-500">
+                Siap mengimpor{' '}
+                <strong className="font-mono text-slate-900">
+                  {parsedBulkPreview.items.length}
+                </strong>{' '}
+                baris barang valid. Kode QR dibuat otomatis apabila kolom Kode QR dikosongkan.
+              </span>
+            )}
+            <button
+              type="button"
+              disabled={parsedBulkPreview.items.length === 0}
+              onClick={handleConfirmBulkImport}
+              className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium text-white bg-slate-900 hover:bg-slate-800 disabled:opacity-40 rounded-lg transition-colors whitespace-nowrap shrink-0"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              Impor {parsedBulkPreview.items.length} Barang Sekarang
+            </button>
           </div>
         </section>
       )}
 
-      {/* Single Item Registration + Live QR Generator */}
+      {/* Single Item Registration + Physical Image Input + Live QR Generator */}
       <section
         aria-label="Form Pendaftaran Barang Baru & Kode QR"
         className="bg-white border border-slate-200 rounded-lg p-6"
       >
         <h3 className="text-sm font-semibold text-slate-900 pb-4 border-b border-slate-200">
-          Daftarkan Barang Baru
+          Daftarkan Barang Baru, Gambar Fisik & Generate Kode QR
         </h3>
 
         <form
@@ -349,7 +1021,7 @@ export const AdminInventoryView: React.FC<AdminInventoryViewProps> = ({
                 htmlFor="item-name-input"
                 className="block text-xs font-medium text-slate-700 mb-1"
               >
-                Nama Barang *
+                Nama Barang Inventaris *
               </label>
               <input
                 id="item-name-input"
@@ -357,7 +1029,7 @@ export const AdminInventoryView: React.FC<AdminInventoryViewProps> = ({
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 placeholder="Contoh: Kamera Mirrorless Sony A7 IV / Proyektor Epson"
-                className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-[#0d113a] focus:ring-1 focus:ring-[#0d113a]"
+                className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-sky-600"
               />
             </div>
 
@@ -374,7 +1046,7 @@ export const AdminInventoryView: React.FC<AdminInventoryViewProps> = ({
                 value={category}
                 onChange={(e) => setCategory(e.target.value)}
                 placeholder="Fotografi / Komputer / Audio"
-                className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-[#0d113a] focus:ring-1 focus:ring-[#0d113a]"
+                className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-sky-600"
               />
             </div>
 
@@ -391,7 +1063,7 @@ export const AdminInventoryView: React.FC<AdminInventoryViewProps> = ({
                 min={1}
                 value={totalStock}
                 onChange={(e) => setTotalStock(e.target.value)}
-                className="w-full px-3 py-2 text-xs font-mono bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-[#0d113a] focus:ring-1 focus:ring-[#0d113a]"
+                className="w-full px-3 py-2 text-xs font-mono bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-sky-600"
               />
             </div>
 
@@ -408,7 +1080,7 @@ export const AdminInventoryView: React.FC<AdminInventoryViewProps> = ({
                 value={location}
                 onChange={(e) => setLocation(e.target.value)}
                 placeholder="Contoh: Rak B-02 / Ruang Server"
-                className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-[#0d113a] focus:ring-1 focus:ring-[#0d113a]"
+                className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-sky-600"
               />
             </div>
 
@@ -425,7 +1097,7 @@ export const AdminInventoryView: React.FC<AdminInventoryViewProps> = ({
                 onChange={(e) =>
                   setCondition(e.target.value as 'Baik' | 'Perlu Perawatan')
                 }
-                className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-[#0d113a] focus:ring-1 focus:ring-[#0d113a]"
+                className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-sky-600"
               >
                 <option value="Baik">Baik (Siap Pakai)</option>
                 <option value="Perlu Perawatan">Perlu Perawatan</option>
@@ -445,7 +1117,7 @@ export const AdminInventoryView: React.FC<AdminInventoryViewProps> = ({
                 value={customQr}
                 onChange={(e) => setCustomQr(e.target.value)}
                 placeholder={previewQrCode}
-                className="w-full px-3 py-2 text-xs font-mono bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-[#0d113a] focus:ring-1 focus:ring-[#0d113a]"
+                className="w-full px-3 py-2 text-xs font-mono bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-sky-600"
               />
             </div>
 
@@ -462,8 +1134,82 @@ export const AdminInventoryView: React.FC<AdminInventoryViewProps> = ({
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
                 placeholder="Tas, baterai cadangan, kabel HDMI..."
-                className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-[#0d113a] focus:ring-1 focus:ring-[#0d113a]"
+                className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-sky-600"
               />
+            </div>
+
+            {/* Physical Item Image Upload & URL Input */}
+            <div className="sm:col-span-2 p-3.5 bg-slate-50 border border-slate-200 rounded-lg space-y-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <label
+                  htmlFor="item-image-url-input"
+                  className="block text-xs font-medium text-slate-700"
+                >
+                  Gambar Fisik Barang (Unggah Foto atau Masukkan URL Gambar)
+                </label>
+                {itemImageUrl && (
+                  <button
+                    type="button"
+                    onClick={() => setItemImageUrl('')}
+                    className="inline-flex items-center gap-1 text-xs font-medium text-red-600 hover:text-red-700"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                    Hapus Gambar
+                  </button>
+                )}
+              </div>
+
+              <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5">
+                <label className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 text-xs font-medium text-sky-700 bg-white hover:bg-sky-50 border border-sky-200 rounded-lg cursor-pointer transition-colors whitespace-nowrap shrink-0">
+                  <Upload className="w-3.5 h-3.5" />
+                  Unggah File Foto Barang
+                  <input
+                    id="item-image-file-input"
+                    type="file"
+                    accept="image/*"
+                    onChange={handleSingleImageUpload}
+                    className="sr-only"
+                  />
+                </label>
+
+                <button
+                  type="button"
+                  onClick={handleGenerateSingleSamplePhoto}
+                  className="inline-flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium text-slate-700 bg-white hover:bg-slate-100 border border-slate-200 rounded-lg transition-colors whitespace-nowrap shrink-0"
+                >
+                  <Sparkles className="w-3.5 h-3.5 text-amber-500" />
+                  Ilustrasi Otomatis
+                </button>
+
+                <input
+                  id="item-image-url-input"
+                  type="text"
+                  value={
+                    itemImageUrl.startsWith('data:image/') ? '' : itemImageUrl
+                  }
+                  onChange={(e) => setItemImageUrl(e.target.value)}
+                  placeholder={
+                    itemImageUrl.startsWith('data:image/')
+                      ? 'File foto fisik barang telah dilampirkan'
+                      : 'Atau tempel URL gambar (https://...)'
+                  }
+                  className="flex-1 px-3 py-2 text-xs bg-white border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-sky-600"
+                />
+              </div>
+
+              {itemImageUrl && (
+                <div className="flex items-center gap-3 pt-1">
+                  <img
+                    src={itemImageUrl}
+                    alt="Pratinjau gambar fisik barang"
+                    referrerPolicy="no-referrer"
+                    className="w-20 h-14 object-cover rounded-lg border border-slate-200 bg-white"
+                  />
+                  <span className="text-xs text-emerald-700 font-medium">
+                    Gambar fisik barang siap disimpan ke katalog inventaris.
+                  </span>
+                </div>
+              )}
             </div>
 
             {formError && (
@@ -480,7 +1226,7 @@ export const AdminInventoryView: React.FC<AdminInventoryViewProps> = ({
             <div className="sm:col-span-2 pt-1">
               <button
                 type="submit"
-                className="inline-flex items-center gap-2 px-4 py-2.5 text-xs font-medium text-white bg-[#0d113a] hover:bg-[#151c54] rounded-lg transition-colors whitespace-nowrap shrink-0 shadow-xs"
+                className="inline-flex items-center gap-2 px-4 py-2.5 text-xs font-medium text-white bg-slate-900 hover:bg-slate-800 rounded-lg transition-colors whitespace-nowrap shrink-0"
               >
                 <QrCode className="w-4 h-4" />
                 Simpan Barang & Generate Kode QR
@@ -488,11 +1234,21 @@ export const AdminInventoryView: React.FC<AdminInventoryViewProps> = ({
             </div>
           </div>
 
-          {/* Live QR Preview Panel */}
+          {/* Live QR & Physical Image Preview Panel */}
           <div className="lg:col-span-4 bg-slate-50 border border-slate-200 rounded-lg p-4 flex flex-col items-center text-center">
             <span className="text-xs font-medium text-slate-500 mb-2">
-              Pratinjau Langsung Kode QR
+              Pratinjau Langsung Barang & Kode QR
             </span>
+            {itemImageUrl && (
+              <div className="w-full h-32 mb-3 rounded-lg overflow-hidden border border-slate-200 bg-white">
+                <img
+                  src={itemImageUrl}
+                  alt="Pratinjau fisik barang"
+                  referrerPolicy="no-referrer"
+                  className="w-full h-full object-cover"
+                />
+              </div>
+            )}
             <QrCodeSvg value={previewQrCode} size={136} />
             <p className="mt-3 font-mono text-sm font-semibold text-slate-900 tabular-nums">
               {previewQrCode}
@@ -515,28 +1271,36 @@ export const AdminInventoryView: React.FC<AdminInventoryViewProps> = ({
         <div className="p-5 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div>
             <h3 className="text-sm font-semibold text-slate-900">
-              Daftar Barang ({filteredItems.length} barang)
+              Daftar Inventaris, Gambar Fisik & Kode QR ({filteredItems.length}{' '}
+              barang)
             </h3>
+            <p className="text-xs text-slate-500 mt-0.5">
+              Klik foto barang untuk memperbesar, Edit untuk mengganti foto fisik, atau Cetak QR untuk mengunduh label QR
+            </p>
           </div>
 
           <div className="flex flex-wrap items-center gap-2.5">
             <div className="relative">
               <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
               <input
+                id="inventory-search-input"
+                name="inventorySearch"
                 type="search"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 placeholder="Cari nama atau kode QR..."
                 aria-label="Cari inventaris"
-                className="pl-8 pr-3 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-[#0d113a] focus:ring-1 focus:ring-[#0d113a] w-52"
+                className="pl-8 pr-3 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-sky-600 w-52"
               />
             </div>
 
             <select
+              id="inventory-category-select"
+              name="inventoryCategory"
               aria-label="Filter kategori inventaris"
               value={selectedCategory}
               onChange={(e) => setSelectedCategory(e.target.value)}
-              className="px-3 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-800 focus:outline-none focus:border-[#0d113a] focus:ring-1 focus:ring-[#0d113a]"
+              className="px-3 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-800 focus:outline-none focus:border-sky-600"
             >
               {categories.map((cat) => (
                 <option key={cat} value={cat}>
@@ -547,12 +1311,24 @@ export const AdminInventoryView: React.FC<AdminInventoryViewProps> = ({
           </div>
         </div>
 
+        {tableActionMessage && (
+          <div
+            className={`px-5 py-3 text-xs font-medium border-b ${
+              tableActionMessage.type === 'error'
+                ? 'bg-red-50 border-red-200 text-red-700'
+                : 'bg-emerald-50 border-emerald-200 text-emerald-700'
+            }`}
+          >
+            {tableActionMessage.text}
+          </div>
+        )}
+
         <div className="overflow-x-auto">
           <table className="w-full text-left border-collapse">
             <thead>
               <tr className="border-b border-slate-200 bg-slate-50/70 text-xs font-medium text-slate-500">
                 <th className="py-3 px-4">QR & Kode</th>
-                <th className="py-3 px-4">Nama Barang</th>
+                <th className="py-3 px-4">Foto Fisik & Nama Barang</th>
                 <th className="py-3 px-4">Kategori · Lokasi · Kondisi</th>
                 <th className="py-3 px-4 text-right">Tersedia / Total</th>
                 <th className="py-3 px-4 text-right">Kelola Stok & QR</th>
@@ -562,7 +1338,7 @@ export const AdminInventoryView: React.FC<AdminInventoryViewProps> = ({
               {filteredItems.length === 0 ? (
                 <tr>
                   <td colSpan={5} className="py-10 text-center text-slate-500">
-                    Belum ada barang di dalam daftar inventaris. Silakan daftarkan barang di atas atau gunakan fitur Bulk Import CSV/Excel.
+                    Belum ada barang di dalam daftar inventaris. Silakan daftarkan barang di atas atau gunakan fitur Bulk Import Template Excel/Kolom.
                   </td>
                 </tr>
               ) : (
@@ -580,10 +1356,47 @@ export const AdminInventoryView: React.FC<AdminInventoryViewProps> = ({
                       </div>
                     </td>
                     <td className="py-3 px-4">
-                      <p className="font-semibold text-slate-900">{item.name}</p>
-                      <p className="text-slate-500 line-clamp-1 mt-0.5">
-                        {item.description}
-                      </p>
+                      <div className="flex items-center gap-3">
+                        {item.imageUrl ? (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setPreviewImageItem({
+                                name: item.name,
+                                qrCode: item.qrCode,
+                                imageUrl: item.imageUrl!,
+                              })
+                            }
+                            title="Klik untuk melihat foto fisik barang"
+                            className="w-12 h-12 rounded-lg border border-slate-200 overflow-hidden shrink-0 bg-slate-100 hover:opacity-90 transition-opacity"
+                          >
+                            <img
+                              src={item.imageUrl}
+                              alt={item.name}
+                              referrerPolicy="no-referrer"
+                              className="w-full h-full object-cover"
+                            />
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => handleOpenEditModal(item)}
+                            title="Klik untuk menambahkan foto fisik barang"
+                            className="w-12 h-12 rounded-lg border border-dashed border-slate-300 bg-slate-50 hover:bg-slate-100 flex flex-col items-center justify-center shrink-0 text-slate-400 transition-colors"
+                          >
+                            <ImageIcon className="w-4 h-4" />
+                            <span className="text-[9px] mt-0.5">+ Foto</span>
+                          </button>
+                        )}
+                        <div className="min-w-0">
+                          <p className="font-semibold text-slate-900">
+                            {item.name}
+                          </p>
+                          <p className="text-slate-500 line-clamp-1 mt-0.5">
+                            {item.description}
+                          </p>
+                        </div>
+                      </div>
                     </td>
                     <td className="py-3 px-4 text-slate-600 whitespace-nowrap">
                       <span>{item.category}</span>
@@ -614,6 +1427,17 @@ export const AdminInventoryView: React.FC<AdminInventoryViewProps> = ({
                       <div className="inline-flex items-center gap-1.5">
                         <button
                           type="button"
+                          disabled={
+                            item.availableStock <= 0 || item.totalStock <= 1
+                          }
+                          onClick={() => onUpdateItemStock(item.id, -1)}
+                          aria-label={`Kurangi stok ${item.name}`}
+                          className="px-2 py-1 text-xs font-mono font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 disabled:opacity-40 rounded transition-colors"
+                        >
+                          -1 Stok
+                        </button>
+                        <button
+                          type="button"
                           onClick={() => onUpdateItemStock(item.id, 1)}
                           aria-label={`Tambah stok ${item.name}`}
                           className="px-2 py-1 text-xs font-mono font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded transition-colors"
@@ -622,15 +1446,24 @@ export const AdminInventoryView: React.FC<AdminInventoryViewProps> = ({
                         </button>
                         <button
                           type="button"
+                          onClick={() => handleOpenEditModal(item)}
+                          aria-label={`Edit ${item.name}`}
+                          className="inline-flex items-center gap-1 px-2 py-1 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded transition-colors"
+                        >
+                          <Pencil className="w-3.5 h-3.5" />
+                          Edit
+                        </button>
+                        <button
+                          type="button"
                           onClick={() => onInspectQr(item)}
-                          className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-[#e71f69] bg-[#e71f69]/10 hover:bg-[#e71f69]/20 rounded transition-colors"
+                          className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-sky-700 bg-sky-50 hover:bg-sky-100 rounded transition-colors"
                         >
                           <QrCode className="w-3.5 h-3.5" />
                           Cetak QR
                         </button>
                         <button
                           type="button"
-                          onClick={() => onDeleteItem(item.id)}
+                          onClick={() => handleDeleteClick(item)}
                           aria-label={`Hapus ${item.name}`}
                           className="p-1.5 text-slate-400 hover:text-red-600 rounded hover:bg-red-50 transition-colors"
                         >
@@ -645,6 +1478,272 @@ export const AdminInventoryView: React.FC<AdminInventoryViewProps> = ({
           </table>
         </div>
       </section>
+
+      {/* Edit Item Modal */}
+      {editingItem && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="edit-item-modal-title"
+        >
+          <div className="bg-white border border-slate-200 rounded-xl max-w-lg w-full p-6 shadow-xl max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-200">
+              <div>
+                <h3
+                  id="edit-item-modal-title"
+                  className="text-sm font-semibold text-slate-900"
+                >
+                  Edit Data & Foto Fisik Barang ({editingItem.qrCode})
+                </h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Perbarui informasi barang, gambar fisik, kondisi, lokasi, atau total stok
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditingItem(null)}
+                aria-label="Tutup modal edit barang"
+                className="p-1 text-slate-400 hover:text-slate-800 rounded"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveEditItem} className="mt-4 space-y-4">
+              <div>
+                <label
+                  htmlFor="edit-item-name"
+                  className="block text-xs font-medium text-slate-700 mb-1"
+                >
+                  Nama Barang *
+                </label>
+                <input
+                  id="edit-item-name"
+                  type="text"
+                  value={editName}
+                  onChange={(e) => setEditName(e.target.value)}
+                  className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-sky-600"
+                />
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label
+                    htmlFor="edit-item-category"
+                    className="block text-xs font-medium text-slate-700 mb-1"
+                  >
+                    Kategori
+                  </label>
+                  <input
+                    id="edit-item-category"
+                    type="text"
+                    value={editCategory}
+                    onChange={(e) => setEditCategory(e.target.value)}
+                    className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-sky-600"
+                  />
+                </div>
+
+                <div>
+                  <label
+                    htmlFor="edit-item-stock"
+                    className="block text-xs font-medium text-slate-700 mb-1"
+                  >
+                    Total Stok *
+                  </label>
+                  <input
+                    id="edit-item-stock"
+                    type="number"
+                    min={Math.max(
+                      1,
+                      editingItem.totalStock - editingItem.availableStock
+                    )}
+                    value={editTotalStock}
+                    onChange={(e) => setEditTotalStock(e.target.value)}
+                    className="w-full px-3 py-2 text-xs font-mono bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-sky-600"
+                  />
+                </div>
+
+                <div>
+                  <label
+                    htmlFor="edit-item-location"
+                    className="block text-xs font-medium text-slate-700 mb-1"
+                  >
+                    Lokasi Penyimpanan
+                  </label>
+                  <input
+                    id="edit-item-location"
+                    type="text"
+                    value={editLocation}
+                    onChange={(e) => setEditLocation(e.target.value)}
+                    className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-sky-600"
+                  />
+                </div>
+
+                <div>
+                  <label
+                    htmlFor="edit-item-condition"
+                    className="block text-xs font-medium text-slate-700 mb-1"
+                  >
+                    Kondisi Fisik
+                  </label>
+                  <select
+                    id="edit-item-condition"
+                    value={editCondition}
+                    onChange={(e) =>
+                      setEditCondition(
+                        e.target.value as 'Baik' | 'Perlu Perawatan'
+                      )
+                    }
+                    className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-sky-600"
+                  >
+                    <option value="Baik">Baik (Siap Pakai)</option>
+                    <option value="Perlu Perawatan">Perlu Perawatan</option>
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label
+                  htmlFor="edit-item-desc"
+                  className="block text-xs font-medium text-slate-700 mb-1"
+                >
+                  Spesifikasi / Kelengkapan
+                </label>
+                <input
+                  id="edit-item-desc"
+                  type="text"
+                  value={editDescription}
+                  onChange={(e) => setEditDescription(e.target.value)}
+                  className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-sky-600"
+                />
+              </div>
+
+              {/* Edit Physical Image */}
+              <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <label
+                    htmlFor="edit-item-image-url"
+                    className="block text-xs font-medium text-slate-700"
+                  >
+                    Gambar Fisik Barang
+                  </label>
+                  {editImageUrl && (
+                    <button
+                      type="button"
+                      onClick={() => setEditImageUrl('')}
+                      className="text-xs font-medium text-red-600 hover:text-red-700"
+                    >
+                      Hapus Gambar
+                    </button>
+                  )}
+                </div>
+
+                {editImageUrl && (
+                  <div className="w-full h-36 rounded-lg overflow-hidden border border-slate-200 bg-white">
+                    <img
+                      src={editImageUrl}
+                      alt={editName}
+                      referrerPolicy="no-referrer"
+                      className="w-full h-full object-cover"
+                    />
+                  </div>
+                )}
+
+                <div className="flex flex-col sm:flex-row gap-2">
+                  <label className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-medium text-sky-700 bg-white hover:bg-sky-50 border border-sky-200 rounded-lg cursor-pointer transition-colors whitespace-nowrap shrink-0">
+                    <Upload className="w-3.5 h-3.5" />
+                    Unggah Foto Baru
+                    <input
+                      type="file"
+                      accept="image/*"
+                      onChange={handleEditImageUpload}
+                      className="sr-only"
+                    />
+                  </label>
+                  <input
+                    id="edit-item-image-url"
+                    type="text"
+                    value={
+                      editImageUrl.startsWith('data:image/') ? '' : editImageUrl
+                    }
+                    onChange={(e) => setEditImageUrl(e.target.value)}
+                    placeholder={
+                      editImageUrl.startsWith('data:image/')
+                        ? 'File foto terlampir'
+                        : 'Atau tempel URL gambar (https://...)'
+                    }
+                    className="flex-1 px-3 py-1.5 text-xs bg-white border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-sky-600"
+                  />
+                </div>
+              </div>
+
+              {editError && (
+                <p className="text-xs font-medium text-red-600">{editError}</p>
+              )}
+
+              <div className="pt-2 flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setEditingItem(null)}
+                  className="px-4 py-2 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg"
+                >
+                  Batal
+                </button>
+                <button
+                  type="submit"
+                  className="px-4 py-2 text-xs font-medium text-white bg-slate-900 hover:bg-slate-800 rounded-lg"
+                >
+                  Simpan Perubahan
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Physical Item Image Lightbox Modal */}
+      {previewImageItem && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/70 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Pratinjau Gambar Fisik Barang"
+          onClick={() => setPreviewImageItem(null)}
+        >
+          <div
+            className="bg-white border border-slate-200 rounded-xl max-w-lg w-full p-5 shadow-xl space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-slate-200 pb-3">
+              <div>
+                <h3 className="text-sm font-semibold text-slate-900">
+                  {previewImageItem.name}
+                </h3>
+                <p className="text-xs font-mono text-slate-500">
+                  {previewImageItem.qrCode}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPreviewImageItem(null)}
+                aria-label="Tutup pratinjau gambar"
+                className="p-1 text-slate-400 hover:text-slate-800 rounded"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="rounded-lg overflow-hidden border border-slate-200 bg-slate-100 max-h-96 flex items-center justify-center">
+              <img
+                src={previewImageItem.imageUrl}
+                alt={previewImageItem.name}
+                referrerPolicy="no-referrer"
+                className="w-full max-h-96 object-contain"
+              />
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
