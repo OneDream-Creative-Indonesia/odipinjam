@@ -15,6 +15,7 @@ import {
   AlertTriangle,
   Camera,
   CheckCircle2,
+  CheckSquare,
   Clock,
   Mail,
   Minus,
@@ -48,9 +49,11 @@ interface MemberPortalViewProps {
   }) => void;
   onReturnItem: (payload: {
     loanId: string;
+    loanIds?: string[];
     returnNotes: string;
     returnPhotoDataUrl: string;
   }) => void;
+  onCancelLoans: (loanIds: string[]) => void;
   onMarkEmailsRead: (userId: string) => void;
 }
 
@@ -64,15 +67,16 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
   referenceTimeIso,
   onBorrowItem,
   onReturnItem,
+  onCancelLoans,
   onMarkEmailsRead,
 }) => {
-  // Borrow form state (starts empty so nothing is randomly detected before scanning)
+  // Borrow form state
   const [scannedQrCode, setScannedQrCode] = useState('');
   const [quantity, setQuantity] = useState(1);
   const [borrowCart, setBorrowCart] = useState<
     Array<{ itemId: string; quantity: number }>
   >([]);
-  const [selectedCatalogItemId, setSelectedCatalogItemId] = useState('');
+  const [quickChecklistSearch, setQuickChecklistSearch] = useState('');
   const [catalogSearch, setCatalogSearch] = useState('');
   const [durationDays, setDurationDays] = useState(3);
   const [dueDateInput, setDueDateInput] = useState(() => {
@@ -83,14 +87,18 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
   const [borrowPhotoDataUrl, setBorrowPhotoDataUrl] = useState('');
   const [borrowError, setBorrowError] = useState<string | null>(null);
   const [borrowSuccess, setBorrowSuccess] = useState<string | null>(null);
+  const [catalogFeedback, setCatalogFeedback] = useState<string | null>(null);
   const [cameraTarget, setCameraTarget] = useState<'borrow' | 'return' | null>(null);
   const [cameraStatusMsg, setCameraStatusMsg] = useState<string | null>(null);
   const [scanSuccessMsg, setScanSuccessMsg] = useState<string | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
 
-  // Return form state
-  const [selectedReturnLoanId, setSelectedReturnLoanId] = useState<string>('');
+  // Active Loans multi-selection in Catalog & Return tabs
+  const [selectedMyLoanIds, setSelectedMyLoanIds] = useState<string[]>([]);
+
+  // Return form state (supports single or multi-loan return)
+  const [selectedReturnLoanIds, setSelectedReturnLoanIds] = useState<string[]>([]);
   const [returnQrInput, setReturnQrInput] = useState<string>('');
   const [returnNotes, setReturnNotes] = useState<string>('');
   const [returnPhotoDataUrl, setReturnPhotoDataUrl] = useState<string>('');
@@ -127,6 +135,18 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
     [items]
   );
 
+  const filteredQuickChecklistItems = useMemo(() => {
+    const q = quickChecklistSearch.trim().toLowerCase();
+    if (!q) return availableItems;
+    return availableItems.filter(
+      (i) =>
+        i.name.toLowerCase().includes(q) ||
+        i.qrCode.toLowerCase().includes(q) ||
+        i.category.toLowerCase().includes(q) ||
+        i.location.toLowerCase().includes(q)
+    );
+  }, [availableItems, quickChecklistSearch]);
+
   const filteredCatalogItems = useMemo(() => {
     const q = catalogSearch.trim().toLowerCase();
     if (!q) return items;
@@ -143,14 +163,19 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
     return borrowCart
       .map((entry) => {
         const item = items.find((i) => i.id === entry.itemId);
-        if (!item) return null;
+        if (!item || item.availableStock <= 0) return null;
         return {
           item,
-          quantity: Math.max(1, Math.min(item.availableStock || 1, entry.quantity)),
+          quantity: Math.max(1, Math.min(item.availableStock, entry.quantity)),
         };
       })
       .filter((x): x is { item: InventoryItem; quantity: number } => x !== null);
   }, [borrowCart, items]);
+
+  const totalUnitsInCart = useMemo(
+    () => resolvedCartEntries.reduce((sum, e) => sum + e.quantity, 0),
+    [resolvedCartEntries]
+  );
 
   const handleAddToBorrowCart = useCallback(
     (item: InventoryItem, addQty = 1) => {
@@ -183,6 +208,47 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
     []
   );
 
+  const handleToggleItemInCart = (item: InventoryItem) => {
+    setBorrowError(null);
+    setBorrowSuccess(null);
+    setBorrowCart((prev) => {
+      const exists = prev.some((e) => e.itemId === item.id);
+      if (exists) {
+        return prev.filter((e) => e.itemId !== item.id);
+      }
+      if (item.availableStock <= 0) return prev;
+      return [...prev, { itemId: item.id, quantity: 1 }];
+    });
+  };
+
+  const handleSelectAllFilteredItemsToCart = () => {
+    setBorrowError(null);
+    setBorrowSuccess(null);
+    const allSelected =
+      filteredQuickChecklistItems.length > 0 &&
+      filteredQuickChecklistItems.every((it) =>
+        borrowCart.some((c) => c.itemId === it.id)
+      );
+
+    if (allSelected) {
+      const removeSet = new Set(filteredQuickChecklistItems.map((i) => i.id));
+      setBorrowCart((prev) => prev.filter((c) => !removeSet.has(c.itemId)));
+    } else {
+      setBorrowCart((prev) => {
+        const map = new Map(prev.map((c) => [c.itemId, c.quantity]));
+        for (const it of filteredQuickChecklistItems) {
+          if (it.availableStock > 0 && !map.has(it.id)) {
+            map.set(it.id, 1);
+          }
+        }
+        return Array.from(map.entries()).map(([itemId, qty]) => ({
+          itemId,
+          quantity: qty,
+        }));
+      });
+    }
+  };
+
   const handleUpdateCartQuantity = (itemId: string, nextQty: number) => {
     const item = items.find((i) => i.id === itemId);
     if (!item) return;
@@ -200,20 +266,52 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
     setBorrowCart((prev) => prev.filter((e) => e.itemId !== itemId));
   };
 
-  const activeReturnLoan = useMemo(() => {
-    if (selectedReturnLoanId) {
-      return myActiveLoans.find((l) => l.id === selectedReturnLoanId) || null;
+  // Active loans selected for return
+  const activeReturnLoansList = useMemo(() => {
+    if (selectedReturnLoanIds.length > 0) {
+      const found = myActiveLoans.filter((l) =>
+        selectedReturnLoanIds.includes(l.id)
+      );
+      if (found.length > 0) return found;
     }
     if (returnQrInput.trim()) {
-      return (
-        myActiveLoans.find(
-          (l) =>
-            l.itemQrCode.toLowerCase() === returnQrInput.trim().toLowerCase()
-        ) || null
+      const matched = myActiveLoans.filter(
+        (l) =>
+          l.itemQrCode.toLowerCase() === returnQrInput.trim().toLowerCase()
       );
+      if (matched.length > 0) return matched;
     }
-    return myActiveLoans[0] || null;
-  }, [myActiveLoans, selectedReturnLoanId, returnQrInput]);
+    return myActiveLoans.length > 0 ? [myActiveLoans[0]] : [];
+  }, [myActiveLoans, selectedReturnLoanIds, returnQrInput]);
+
+  const activeReturnLoan = activeReturnLoansList[0] || null;
+
+  const handleCancelSingleLoan = (loan: LoanRecord) => {
+    onCancelLoans([loan.id]);
+    setSelectedMyLoanIds((prev) => prev.filter((id) => id !== loan.id));
+    setSelectedReturnLoanIds((prev) => prev.filter((id) => id !== loan.id));
+    setCatalogFeedback(
+      `Peminjaman "${loan.itemName}" (${loan.quantity} unit) berhasil dibatalkan/dihapus dan stok dikembalikan.`
+    );
+    setReturnSuccess(
+      `Peminjaman "${loan.itemName}" (${loan.quantity} unit) berhasil dibatalkan/dihapus.`
+    );
+    setTimeout(() => {
+      setCatalogFeedback(null);
+      setReturnSuccess(null);
+    }, 4500);
+  };
+
+  const handleCancelSelectedMyLoans = () => {
+    if (selectedMyLoanIds.length === 0) return;
+    const count = selectedMyLoanIds.length;
+    onCancelLoans(selectedMyLoanIds);
+    setSelectedMyLoanIds([]);
+    setCatalogFeedback(
+      `${count} peminjaman berhasil dibatalkan/dihapus dan stok telah dikembalikan ke inventaris.`
+    );
+    setTimeout(() => setCatalogFeedback(null), 4500);
+  };
 
   const handleDurationChange = (days: number) => {
     const safeDays = Math.max(1, Math.min(30, days));
@@ -270,7 +368,9 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
           (l) => l.itemQrCode.toLowerCase() === code.toLowerCase()
         );
         if (matchedLoan) {
-          setSelectedReturnLoanId(matchedLoan.id);
+          setSelectedReturnLoanIds((prev) =>
+            prev.includes(matchedLoan.id) ? prev : [...prev, matchedLoan.id]
+          );
         }
         setScanSuccessMsg(`Berhasil memindai Kode QR: ${code}`);
       }
@@ -285,7 +385,6 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
       const ctx = canvas.getContext('2d', { willReadFrequently: true });
       if (!ctx || canvas.width === 0 || canvas.height === 0) return null;
 
-      // 1. Try native BarcodeDetector if available (Android Chrome / Edge / WebView)
       const Win = window as unknown as {
         BarcodeDetector?: new (opts?: { formats: string[] }) => {
           detect: (source: HTMLCanvasElement) => Promise<Array<{ rawValue?: string }>>;
@@ -312,7 +411,6 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
         }
       }
 
-      // 2. Try jsQR (works across iOS Safari, Firefox, Chrome, etc.)
       if (typeof Win.jsQR === 'function') {
         try {
           const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
@@ -332,7 +430,6 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
     []
   );
 
-  // Attach MediaStream after <video> mounts and run continuous QR/barcode detection
   useEffect(() => {
     if (!cameraTarget || !streamRef.current) return;
     const videoEl = videoRef.current;
@@ -340,9 +437,7 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
 
     videoEl.srcObject = streamRef.current;
     videoEl.setAttribute('playsinline', 'true');
-    videoEl.play().catch(() => {
-      // autoplay handled
-    });
+    videoEl.play().catch(() => {});
 
     const offscreen = document.createElement('canvas');
     let isCancelled = false;
@@ -370,7 +465,6 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
     };
   }, [cameraTarget, decodeQrFromCanvas, applyDecodedQrResult]);
 
-  // Stop camera when switching tabs or unmounting
   useEffect(() => {
     return () => {
       if (streamRef.current) {
@@ -472,7 +566,7 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
     const targetItem = resolvedCartEntries[0]?.item || matchedItem;
     if (!targetItem) {
       setBorrowError(
-        'Silakan tambahkan atau scan barang terlebih dahulu sebelum mengambil bukti foto.'
+        'Silakan centang/tambahkan minimal 1 barang terlebih dahulu sebelum mengambil bukti foto.'
       );
       return;
     }
@@ -508,7 +602,7 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
 
     if (entriesToBorrow.length === 0) {
       setBorrowError(
-        'Silakan tambahkan minimal 1 barang yang akan dipinjam (melalui Scan QR atau Pilih Barang).'
+        'Silakan pilih/centang minimal 1 barang yang akan dipinjam pada daftar barang di samping.'
       );
       return;
     }
@@ -548,11 +642,10 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
       .join(', ');
 
     setBorrowSuccess(
-      `Peminjaman ${entriesToBorrow.length} jenis barang [${summaryNames}] berhasil dicatat!`
+      `Peminjaman ${entriesToBorrow.length} jenis barang [${summaryNames}] berhasil dicatat sekaligus & bukti dikirim ke email Anda!`
     );
     setBorrowCart([]);
     setScannedQrCode('');
-    setSelectedCatalogItemId('');
     setPurposeNotes('');
     setBorrowPhotoDataUrl('');
     setQuantity(1);
@@ -570,8 +663,12 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
 
   const handleCaptureInstantReturnPhoto = () => {
     if (!activeReturnLoan) return;
+    const titleLabel =
+      activeReturnLoansList.length > 1
+        ? `${activeReturnLoan.itemName} (+${activeReturnLoansList.length - 1} barang lainnya)`
+        : activeReturnLoan.itemName;
     const svgUrl = createEquipmentPhotoProofSvg({
-      title: activeReturnLoan.itemName,
+      title: titleLabel,
       qrCode: activeReturnLoan.itemQrCode,
       actorName: currentUser.name,
       timestampLabel: new Date().toLocaleString('id-ID'),
@@ -586,7 +683,7 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
     setReturnError(null);
     setReturnSuccess(null);
 
-    if (!activeReturnLoan) {
+    if (activeReturnLoansList.length === 0) {
       setReturnError('Pilih atau scan QR barang yang sedang Anda pinjam.');
       return;
     }
@@ -597,22 +694,33 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
       return;
     }
 
+    const idsToReturn = activeReturnLoansList.map((l) => l.id);
+
     onReturnItem({
-      loanId: activeReturnLoan.id,
+      loanId: idsToReturn[0],
+      loanIds: idsToReturn,
       returnNotes:
         returnNotes.trim() ||
         'Barang dikembalikan lengkap dalam kondisi berfungsi baik.',
       returnPhotoDataUrl,
     });
 
+    const returnedNames = activeReturnLoansList
+      .map((l) => `${l.itemName} (${l.itemQrCode})`)
+      .join(', ');
+
     setReturnSuccess(
-      `Barang "${activeReturnLoan.itemName}" (${activeReturnLoan.itemQrCode}) telah berhasil dikembalikan ke inventaris.`
+      `${activeReturnLoansList.length} pinjaman [${returnedNames}] telah berhasil dikembalikan ke inventaris.`
     );
     setReturnNotes('');
     setReturnPhotoDataUrl('');
     setReturnQrInput('');
-    setSelectedReturnLoanId('');
+    setSelectedReturnLoanIds([]);
   };
+
+  const allMyActiveSelected =
+    myActiveLoans.length > 0 &&
+    myActiveLoans.every((l) => selectedMyLoanIds.includes(l.id));
 
   return (
     <div className="space-y-8">
@@ -621,90 +729,161 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
         const d = calculateDueState(l, referenceTimeIso, 24);
         return d.state === 'hampir_habis' || d.state === 'terlambat';
       }) && (
-          <section
-            aria-label="Peringatan Peminjaman Anggota"
-            className="bg-white border border-slate-200 rounded-lg p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4"
-          >
-            <div className="flex items-start gap-3">
-              <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
-              <div>
-                <h3 className="text-sm font-semibold text-slate-900">
-                  Pengingat Batas Waktu Peminjaman Anda
-                </h3>
-                <p className="text-xs text-slate-600 mt-0.5">
-                  Anda memiliki barang pinjaman yang batas waktunya hampir habis atau belum dikembalikan. Periksa kotak masuk notifikasi email atau segera lakukan pengembalian.
-                </p>
-              </div>
+        <section
+          aria-label="Peringatan Peminjaman Anggota"
+          className="bg-white border border-slate-200 rounded-lg p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4"
+        >
+          <div className="flex items-start gap-3">
+            <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+            <div>
+              <h3 className="text-sm font-semibold text-slate-900">
+                Pengingat Batas Waktu Peminjaman Anda
+              </h3>
+              <p className="text-xs text-slate-600 mt-0.5">
+                Anda memiliki barang pinjaman yang batas waktunya hampir habis atau belum dikembalikan. Periksa kotak masuk email Anda atau segera lakukan pengembalian.
+              </p>
             </div>
-            <div className="flex items-center gap-2 shrink-0">
-              <button
-                type="button"
-                onClick={() => onChangeTab('return')}
-                className="px-3.5 py-2 text-xs font-medium text-white bg-[#0d113a] hover:bg-[#151c54] rounded-lg whitespace-nowrap shrink-0 shadow-xs"
-              >
-                Kembalikan Barang
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  onMarkEmailsRead(currentUser.id);
-                  onChangeTab('notifications');
-                }}
-                className="px-3.5 py-2 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg whitespace-nowrap shrink-0"
-              >
-                Buka Email ({myEmails.length})
-              </button>
-            </div>
-          </section>
-        )}
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => onChangeTab('return')}
+              className="px-3.5 py-2 text-xs font-medium text-white bg-[#0d113a] hover:bg-[#151c54] rounded-lg whitespace-nowrap shrink-0 shadow-xs"
+            >
+              Kembalikan Barang
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                onMarkEmailsRead(currentUser.id);
+                onChangeTab('notifications');
+              }}
+              className="px-3.5 py-2 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg whitespace-nowrap shrink-0"
+            >
+              Buka Email ({myEmails.length})
+            </button>
+          </div>
+        </section>
+      )}
 
       {/* TAB 1: CATALOG & MY LOANS */}
       {activeTab === 'catalog' && (
         <div className="space-y-8">
+          {catalogFeedback && (
+            <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-3.5 text-xs font-medium text-emerald-800 flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 shrink-0" />
+              <span>{catalogFeedback}</span>
+            </div>
+          )}
+
           {/* Active Loans Summary */}
           <section
             aria-label="Peminjaman Aktif Saya"
             className="bg-white border border-slate-200 rounded-lg overflow-hidden"
           >
-            <div className="p-5 border-b border-slate-200 flex items-center justify-between">
+            <div className="p-5 border-b border-slate-200 flex flex-wrap items-center justify-between gap-3">
               <div>
                 <h2 className="text-base font-semibold text-slate-900">
-                  Barang yang kamu Pinjam ({myActiveLoans.length})
+                  Barang yang Kamu Pinjam ({myActiveLoans.length})
                 </h2>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Anda dapat mengembalikan barang atau membatalkan/menghapus pinjaman jika salah input
+                </p>
               </div>
-              <button
-                type="button"
-                onClick={() => onChangeTab('borrow')}
-                className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-white bg-[#0d113a] hover:bg-[#151c54] rounded-lg whitespace-nowrap shrink-0 shadow-xs"
-              >
-                <ScanLine className="w-3.5 h-3.5" />
-                Pinjam Barang
-              </button>
+              <div className="flex flex-wrap items-center gap-2">
+                {selectedMyLoanIds.length > 0 && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedReturnLoanIds(selectedMyLoanIds);
+                        onChangeTab('return');
+                      }}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg shadow-xs"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5" />
+                      Kembalikan Terpilih ({selectedMyLoanIds.length})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleCancelSelectedMyLoans}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-red-600 hover:bg-red-700 rounded-lg shadow-xs"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      Batal Pinjam Terpilih ({selectedMyLoanIds.length})
+                    </button>
+                  </>
+                )}
+                <button
+                  type="button"
+                  onClick={() => onChangeTab('borrow')}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-white bg-[#0d113a] hover:bg-[#151c54] rounded-lg whitespace-nowrap shrink-0 shadow-xs"
+                >
+                  <ScanLine className="w-3.5 h-3.5" />
+                  Pinjam Banyak Barang Sekaligus
+                </button>
+              </div>
             </div>
 
             <div className="overflow-x-auto">
               <table className="w-full text-left border-collapse">
                 <thead>
                   <tr className="border-b border-slate-200 bg-slate-50/70 text-xs font-medium text-slate-500">
-                    <th className="py-3 px-4">Kode Barang</th>
+                    <th className="py-3 px-4 w-10">
+                      <input
+                        type="checkbox"
+                        checked={allMyActiveSelected}
+                        onChange={() => {
+                          if (allMyActiveSelected) {
+                            setSelectedMyLoanIds([]);
+                          } else {
+                            setSelectedMyLoanIds(myActiveLoans.map((l) => l.id));
+                          }
+                        }}
+                        aria-label="Pilih semua pinjaman aktif saya"
+                        className="rounded border-slate-300"
+                      />
+                    </th>
+                    <th className="py-3 px-4">Kode & Nama Barang</th>
                     <th className="py-3 px-4">Tanggal Pinjam · Jatuh Tempo</th>
                     <th className="py-3 px-4">Catatan Pemakaian</th>
                     <th className="py-3 px-4">Status Waktu</th>
-                    <th className="py-3 px-4 text-right">Aksi</th>
+                    <th className="py-3 px-4 text-right">Kembalikan / Batal Pinjam</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-200 text-xs">
                   {myActiveLoans.length === 0 ? (
                     <tr>
-                      <td colSpan={5} className="py-8 text-center text-slate-500">
+                      <td colSpan={6} className="py-8 text-center text-slate-500">
                         Anda tidak memiliki peminjaman aktif saat ini.
                       </td>
                     </tr>
                   ) : (
                     myActiveLoans.map((loan) => {
                       const due = calculateDueState(loan, referenceTimeIso, 24);
+                      const isChecked = selectedMyLoanIds.includes(loan.id);
                       return (
-                        <tr key={loan.id} className="hover:bg-slate-50/80">
+                        <tr
+                          key={loan.id}
+                          className={`hover:bg-slate-50/80 ${
+                            isChecked ? 'bg-sky-50/50' : ''
+                          }`}
+                        >
+                          <td className="py-3 px-4">
+                            <input
+                              type="checkbox"
+                              checked={isChecked}
+                              onChange={() =>
+                                setSelectedMyLoanIds((prev) =>
+                                  prev.includes(loan.id)
+                                    ? prev.filter((id) => id !== loan.id)
+                                    : [...prev, loan.id]
+                                )
+                              }
+                              aria-label={`Pilih pinjaman ${loan.itemName}`}
+                              className="rounded border-slate-300"
+                            />
+                          </td>
                           <td className="py-3 px-4">
                             <p className="font-semibold text-slate-900">
                               {loan.itemName}
@@ -742,18 +921,29 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
                             )}
                           </td>
                           <td className="py-3 px-4 text-right whitespace-nowrap">
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setSelectedReturnLoanId(loan.id);
-                                setReturnQrInput(loan.itemQrCode);
-                                onChangeTab('return');
-                              }}
-                              className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-white bg-[#e71f69] hover:bg-[#cf165b] rounded-md transition-colors shadow-xs"
-                            >
-                              <RotateCcw className="w-3.5 h-3.5" />
-                              Kembalikan
-                            </button>
+                            <div className="inline-flex items-center gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setSelectedReturnLoanIds([loan.id]);
+                                  setReturnQrInput(loan.itemQrCode);
+                                  onChangeTab('return');
+                                }}
+                                className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-white bg-[#e71f69] hover:bg-[#cf165b] rounded-md transition-colors shadow-xs"
+                              >
+                                <RotateCcw className="w-3.5 h-3.5" />
+                                Kembalikan
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleCancelSingleLoan(loan)}
+                                title="Batal pinjam / hapus pinjaman ini"
+                                className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-red-600 bg-red-50 hover:bg-red-100 rounded-md transition-colors"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                                Batal Pinjam
+                              </button>
+                            </div>
                           </td>
                         </tr>
                       );
@@ -772,13 +962,13 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
             <div className="p-5 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <div>
                 <h2 className="text-base font-semibold text-slate-900">
-                  Pilih & Tambah Barang yang Akan Dipinjam ({availableItems.length} Tersedia)
+                  Pilih & Centang Banyak Barang untuk Dipinjam ({availableItems.length} Tersedia)
                 </h2>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  Klik tombol <strong>+ Tambah Pinjam</strong> pada barang untuk memasukkannya ke daftar peminjaman Anda.
+                  Centang beberapa barang sekaligus lalu klik <strong>Lanjut Pinjam Sekaligus</strong> di kanan atas.
                 </p>
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <div className="relative">
                   <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
                   <input
@@ -793,10 +983,10 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
                   <button
                     type="button"
                     onClick={() => onChangeTab('borrow')}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-[#e71f69] hover:bg-[#cf165b] rounded-lg whitespace-nowrap shrink-0 shadow-xs"
+                    className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-white bg-[#e71f69] hover:bg-[#cf165b] rounded-lg whitespace-nowrap shrink-0 shadow-xs"
                   >
                     <Package className="w-3.5 h-3.5" />
-                    Lanjut Pinjam ({resolvedCartEntries.length})
+                    Lanjut Pinjam Sekaligus ({resolvedCartEntries.length} Barang · {totalUnitsInCart} Unit)
                   </button>
                 )}
               </div>
@@ -806,16 +996,17 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
               <table className="w-full text-left border-collapse">
                 <thead>
                   <tr className="border-b border-slate-200 bg-slate-50/70 text-xs font-medium text-slate-500">
+                    <th className="py-3 px-4 w-10">Pilih</th>
                     <th className="py-3 px-4">Nama & Kode Barang</th>
                     <th className="py-3 px-4">Kategori · Lokasi</th>
                     <th className="py-3 px-4">Stok Tersedia</th>
-                    <th className="py-3 px-4 text-right">Aksi</th>
+                    <th className="py-3 px-4 text-right">Jumlah Pinjam</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-200 text-xs">
                   {filteredCatalogItems.length === 0 ? (
                     <tr>
-                      <td colSpan={4} className="py-8 text-center text-slate-500">
+                      <td colSpan={5} className="py-8 text-center text-slate-500">
                         Tidak ada barang yang cocok dengan pencarian.
                       </td>
                     </tr>
@@ -824,7 +1015,22 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
                       const inCart = borrowCart.find((c) => c.itemId === item.id);
                       const isAvailable = item.availableStock > 0;
                       return (
-                        <tr key={item.id} className="hover:bg-slate-50/80">
+                        <tr
+                          key={item.id}
+                          className={`hover:bg-slate-50/80 ${
+                            inCart ? 'bg-sky-50/60' : ''
+                          }`}
+                        >
+                          <td className="py-3 px-4">
+                            <input
+                              type="checkbox"
+                              disabled={!isAvailable}
+                              checked={Boolean(inCart)}
+                              onChange={() => handleToggleItemInCart(item)}
+                              aria-label={`Pilih ${item.name}`}
+                              className="rounded border-slate-300 w-4 h-4"
+                            />
+                          </td>
                           <td className="py-3 px-4">
                             <div className="flex items-center gap-3">
                               {item.imageUrl && (
@@ -860,24 +1066,58 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
                             )}
                           </td>
                           <td className="py-3 px-4 text-right whitespace-nowrap">
-                            <div className="inline-flex items-center gap-2">
-                              {inCart && (
-                                <span className="px-2 py-0.5 text-[11px] font-mono font-semibold rounded bg-[#0d113a]/10 text-[#0d113a]">
-                                  Di Daftar: {inCart.quantity} unit
-                                </span>
-                              )}
+                            {inCart ? (
+                              <div className="inline-flex items-center gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    handleUpdateCartQuantity(
+                                      item.id,
+                                      inCart.quantity - 1
+                                    )
+                                  }
+                                  className="p-1 rounded border border-slate-200 bg-white hover:bg-slate-100"
+                                >
+                                  <Minus className="w-3 h-3" />
+                                </button>
+                                <input
+                                  type="number"
+                                  min={1}
+                                  max={item.availableStock}
+                                  value={inCart.quantity}
+                                  onChange={(e) =>
+                                    handleUpdateCartQuantity(
+                                      item.id,
+                                      Number.parseInt(e.target.value, 10) || 1
+                                    )
+                                  }
+                                  className="w-12 py-1 text-center text-xs font-mono border border-slate-200 rounded bg-white"
+                                />
+                                <button
+                                  type="button"
+                                  disabled={inCart.quantity >= item.availableStock}
+                                  onClick={() =>
+                                    handleUpdateCartQuantity(
+                                      item.id,
+                                      inCart.quantity + 1
+                                    )
+                                  }
+                                  className="p-1 rounded border border-slate-200 bg-white hover:bg-slate-100 disabled:opacity-40"
+                                >
+                                  <Plus className="w-3 h-3" />
+                                </button>
+                              </div>
+                            ) : (
                               <button
                                 type="button"
                                 disabled={!isAvailable}
-                                onClick={() => {
-                                  handleAddToBorrowCart(item, 1);
-                                }}
+                                onClick={() => handleAddToBorrowCart(item, 1)}
                                 className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-white bg-[#0d113a] hover:bg-[#151c54] disabled:bg-slate-200 disabled:text-slate-400 rounded-md transition-colors shadow-xs"
                               >
                                 <Plus className="w-3.5 h-3.5 text-[#e71f69]" />
-                                Tambah Pinjam
+                                Pilih Pinjam
                               </button>
-                            </div>
+                            )}
                           </td>
                         </tr>
                       );
@@ -890,24 +1130,24 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
         </div>
       )}
 
-      {/* TAB 2: BORROW ITEM (SCAN QR + ADD MULTIPLE ITEMS + DURATION + NOTES + PHOTO PROOF) */}
+      {/* TAB 2: BORROW ITEM (MULTI-ITEM CHECKLIST + SCAN QR + DURATION + NOTES + PHOTO PROOF) */}
       {activeTab === 'borrow' && (
         <section
-          aria-label="Formulir Peminjaman Barang dengan Scan QR dan Bukti Foto"
+          aria-label="Formulir Peminjaman Banyak Barang Sekaligus"
           className="bg-white border border-slate-200 rounded-lg p-6"
         >
           <div className="pb-4 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2">
             <div>
               <h2 className="text-base font-semibold text-slate-900">
-                Pinjam Barang
+                Formulir Pinjam Banyak Barang Sekaligus
               </h2>
               <p className="text-xs text-slate-500 mt-0.5">
-                Anda dapat memindai Kode QR atau memilih beberapa barang sekaligus ke dalam daftar pinjaman.
+                Centang banyak barang sekaligus dari daftar di bawah atau Scan Kode QR, lalu cukup isi 1x durasi, keperluan, dan bukti foto untuk semua barang.
               </p>
             </div>
             {resolvedCartEntries.length > 0 && (
-              <span className="px-2.5 py-1 text-xs font-semibold rounded-full bg-[#0d113a] text-white">
-                {resolvedCartEntries.length} Jenis Barang Dipilih
+              <span className="px-3 py-1 text-xs font-semibold rounded-full bg-[#0d113a] text-white">
+                {resolvedCartEntries.length} Jenis Barang ({totalUnitsInCart} Unit) Dipilih
               </span>
             )}
           </div>
@@ -916,15 +1156,15 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
             onSubmit={handleSubmitBorrow}
             className="mt-6 grid grid-cols-1 lg:grid-cols-12 gap-8"
           >
-            {/* Left Column: QR Scanner & Item Selection */}
-            <div className="lg:col-span-5 space-y-5">
+            {/* Left Column: Multi-Select Checklist & QR Scanner */}
+            <div className="lg:col-span-6 space-y-5">
               {/* Method A: Scan QR Code */}
               <div>
                 <label
                   htmlFor="scan-qr-input"
                   className="block text-xs font-semibold text-slate-800 mb-1.5"
                 >
-                  1. Scan atau Ketik Kode QR Barang
+                  1. Scan Kode QR Barang (Otomatis Masuk Daftar Pinjam)
                 </label>
                 <div className="flex flex-wrap gap-2">
                   <input
@@ -936,7 +1176,7 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
                       setScanSuccessMsg(null);
                     }}
                     placeholder="Scan atau ketik Kode QR..."
-                    className="flex-1 min-w-[150px] px-3 py-2 text-xs font-mono bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-[#0d113a] focus:ring-1 focus:ring-[#0d113a]"
+                    className="flex-1 min-w-[150px] px-3 py-2 text-xs font-mono bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-[#0d113a]"
                   />
                   <button
                     type="button"
@@ -979,7 +1219,7 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
                     </div>
                   </div>
                   <p className="text-xs text-slate-200">
-                    Arahkan kamera ke Kode QR / Barcode pada barang...
+                    Arahkan kamera ke Kode QR pada barang...
                   </p>
                 </div>
               )}
@@ -997,105 +1237,177 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
                 </p>
               )}
 
-              {/* Matched Item Card from QR */}
-              {scannedQrCode.trim() !== '' && (
-                matchedItem ? (
-                  <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-lg flex items-center justify-between gap-3">
-                    <div className="flex items-center gap-3">
-                      {matchedItem.imageUrl ? (
-                        <img
-                          src={matchedItem.imageUrl}
-                          alt={matchedItem.name}
-                          referrerPolicy="no-referrer"
-                          className="w-14 h-14 rounded-lg object-cover border border-slate-200 shrink-0 bg-white"
-                        />
-                      ) : (
-                        <QrCodeSvg value={matchedItem.qrCode} size={56} />
-                      )}
-                      <div className="text-xs space-y-0.5">
-                        <span className="font-mono font-semibold text-[#e71f69]">
-                          TERDETEKSI · {matchedItem.qrCode}
-                        </span>
-                        <p className="font-semibold text-slate-900 text-sm">
-                          {matchedItem.name}
-                        </p>
-                        <p className="text-slate-500">
-                          Tersedia:{' '}
-                          <strong className="font-mono text-slate-900">
-                            {matchedItem.availableStock} unit
-                          </strong>
-                        </p>
-                      </div>
+              {scannedQrCode.trim() !== '' && matchedItem && (
+                <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-lg flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-3">
+                    {matchedItem.imageUrl ? (
+                      <img
+                        src={matchedItem.imageUrl}
+                        alt={matchedItem.name}
+                        referrerPolicy="no-referrer"
+                        className="w-12 h-12 rounded-lg object-cover border border-slate-200 shrink-0 bg-white"
+                      />
+                    ) : (
+                      <QrCodeSvg value={matchedItem.qrCode} size={48} />
+                    )}
+                    <div className="text-xs">
+                      <span className="font-mono font-semibold text-[#e71f69]">
+                        TERDETEKSI · {matchedItem.qrCode}
+                      </span>
+                      <p className="font-semibold text-slate-900">
+                        {matchedItem.name}
+                      </p>
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        handleAddToBorrowCart(matchedItem, 1);
-                        setScannedQrCode('');
-                      }}
-                      className="inline-flex items-center gap-1 px-3 py-2 text-xs font-semibold text-white bg-[#e71f69] hover:bg-[#cf165b] rounded-lg shrink-0 shadow-xs"
-                    >
-                      <Plus className="w-3.5 h-3.5" />
-                      Tambah
-                    </button>
                   </div>
-                ) : (
-                  <div className="p-3.5 bg-red-50 border border-red-200 rounded-lg text-xs text-red-700">
-                    Kode QR <span className="font-mono font-semibold">"{scannedQrCode}"</span> tidak ditemukan dalam inventaris.
-                  </div>
-                )
-              )}
-
-              {/* Method B: Add Item Directly from Available Inventory Dropdown */}
-              <div className="pt-2 border-t border-slate-200">
-                <label
-                  htmlFor="select-borrow-item"
-                  className="block text-xs font-semibold text-slate-800 mb-1.5"
-                >
-                  2. Atau Pilih & Tambah dari Daftar Barang Tersedia
-                </label>
-                <div className="flex gap-2">
-                  <select
-                    id="select-borrow-item"
-                    value={selectedCatalogItemId}
-                    onChange={(e) => setSelectedCatalogItemId(e.target.value)}
-                    className="flex-1 min-w-0 px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-[#0d113a] focus:ring-1 focus:ring-[#0d113a]"
-                  >
-                    <option value="">-- Pilih Barang yang Akan Dipinjam --</option>
-                    {availableItems.map((item) => (
-                      <option key={item.id} value={item.id}>
-                        {item.name} ({item.qrCode}) — Tersedia: {item.availableStock} unit
-                      </option>
-                    ))}
-                  </select>
                   <button
                     type="button"
                     onClick={() => {
-                      const target = availableItems.find(
-                        (i) => i.id === selectedCatalogItemId
-                      );
-                      if (target) {
-                        handleAddToBorrowCart(target, 1);
-                        setSelectedCatalogItemId('');
-                      } else {
-                        setBorrowError(
-                          'Pilih barang terlebih dahulu dari daftar sebelum menekan tombol + Tambah Barang.'
-                        );
-                      }
+                      handleAddToBorrowCart(matchedItem, 1);
+                      setScannedQrCode('');
                     }}
-                    className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-white bg-[#e71f69] hover:bg-[#cf165b] rounded-lg transition-colors whitespace-nowrap shrink-0 shadow-xs"
+                    className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-semibold text-white bg-[#e71f69] hover:bg-[#cf165b] rounded-lg shrink-0"
                   >
                     <Plus className="w-3.5 h-3.5" />
-                    Tambah Barang
+                    Tambah
                   </button>
+                </div>
+              )}
+
+              {/* Method B: Multi-Item Checklist Table (Centang Banyak Barang Sekaligus) */}
+              <div className="pt-2 border-t border-slate-200 space-y-2.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <label className="text-xs font-semibold text-slate-800 flex items-center gap-1.5">
+                    <CheckSquare className="w-3.5 h-3.5 text-[#e71f69]" />
+                    2. Centang Banyak Barang Sekaligus ({availableItems.length} Tersedia)
+                  </label>
+                  <button
+                    type="button"
+                    onClick={handleSelectAllFilteredItemsToCart}
+                    className="text-xs font-medium text-sky-700 hover:underline"
+                  >
+                    {filteredQuickChecklistItems.length > 0 &&
+                    filteredQuickChecklistItems.every((it) =>
+                      borrowCart.some((c) => c.itemId === it.id)
+                    )
+                      ? 'Batal Pilih Semua'
+                      : 'Pilih Semua Barang'}
+                  </button>
+                </div>
+
+                <div className="relative">
+                  <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    value={quickChecklistSearch}
+                    onChange={(e) => setQuickChecklistSearch(e.target.value)}
+                    placeholder="Ketik nama barang / kategori / kode QR untuk memfilter..."
+                    className="w-full pl-8 pr-3 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-[#0d113a]"
+                  />
+                </div>
+
+                <div className="border border-slate-200 rounded-lg max-h-64 overflow-y-auto divide-y divide-slate-200 bg-white">
+                  {filteredQuickChecklistItems.length === 0 ? (
+                    <div className="p-4 text-center text-xs text-slate-500">
+                      Tidak ada barang tersedia yang cocok dengan pencarian.
+                    </div>
+                  ) : (
+                    filteredQuickChecklistItems.map((item) => {
+                      const cartEntry = borrowCart.find(
+                        (c) => c.itemId === item.id
+                      );
+                      const isChecked = Boolean(cartEntry);
+                      return (
+                        <div
+                          key={item.id}
+                          onClick={() => handleToggleItemInCart(item)}
+                          className={`p-2.5 flex items-center justify-between gap-3 cursor-pointer transition-colors ${
+                            isChecked ? 'bg-sky-50/70' : 'hover:bg-slate-50'
+                          }`}
+                        >
+                          <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                            <input
+                              type="checkbox"
+                              checked={isChecked}
+                              onChange={() => {}}
+                              className="rounded border-slate-300 w-4 h-4 shrink-0 pointer-events-none"
+                            />
+                            {item.imageUrl && (
+                              <img
+                                src={item.imageUrl}
+                                alt={item.name}
+                                referrerPolicy="no-referrer"
+                                className="w-9 h-9 rounded object-cover border border-slate-200 shrink-0 bg-slate-100"
+                              />
+                            )}
+                            <div className="min-w-0 flex-1">
+                              <p className="text-xs font-semibold text-slate-900 truncate">
+                                {item.name}
+                              </p>
+                              <p className="text-[11px] font-mono text-slate-500">
+                                {item.qrCode} · Tersedia: {item.availableStock} unit
+                              </p>
+                            </div>
+                          </div>
+
+                          {isChecked && cartEntry && (
+                            <div
+                              onClick={(e) => e.stopPropagation()}
+                              className="flex items-center gap-1 shrink-0"
+                            >
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  handleUpdateCartQuantity(
+                                    item.id,
+                                    cartEntry.quantity - 1
+                                  )
+                                }
+                                className="p-1 rounded border border-slate-200 bg-white hover:bg-slate-100"
+                              >
+                                <Minus className="w-3 h-3" />
+                              </button>
+                              <input
+                                type="number"
+                                min={1}
+                                max={item.availableStock}
+                                value={cartEntry.quantity}
+                                onChange={(e) =>
+                                  handleUpdateCartQuantity(
+                                    item.id,
+                                    Number.parseInt(e.target.value, 10) || 1
+                                  )
+                                }
+                                className="w-11 py-0.5 text-center text-xs font-mono border border-slate-200 rounded bg-white"
+                              />
+                              <button
+                                type="button"
+                                disabled={
+                                  cartEntry.quantity >= item.availableStock
+                                }
+                                onClick={() =>
+                                  handleUpdateCartQuantity(
+                                    item.id,
+                                    cartEntry.quantity + 1
+                                  )
+                                }
+                                className="p-1 rounded border border-slate-200 bg-white hover:bg-slate-100 disabled:opacity-40"
+                              >
+                                <Plus className="w-3 h-3" />
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })
+                  )}
                 </div>
               </div>
 
-              {/* List of Added Items to Borrow (Cart) */}
-              <div className="space-y-2.5 pt-2 border-t border-slate-200">
+              {/* Selected Items Summary Cart */}
+              <div className="space-y-2 pt-2 border-t border-slate-200">
                 <div className="flex items-center justify-between">
                   <span className="text-xs font-semibold text-slate-800">
-                    Daftar Barang yang Akan Dipinjam ({resolvedCartEntries.length})
+                    Ringkasan Daftar Barang Dipinjam ({resolvedCartEntries.length} Jenis · {totalUnitsInCart} Unit)
                   </span>
                   {resolvedCartEntries.length > 0 && (
                     <button
@@ -1103,86 +1415,39 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
                       onClick={() => setBorrowCart([])}
                       className="text-[11px] font-medium text-red-600 hover:underline"
                     >
-                      Kosongkan Daftar
+                      Kosongkan Semua
                     </button>
                   )}
                 </div>
 
                 {resolvedCartEntries.length === 0 ? (
-                  <div className="p-4 bg-slate-50 border border-dashed border-slate-300 rounded-lg text-xs text-slate-600 flex items-start gap-2.5">
-                    <QrCode className="w-4 h-4 text-slate-400 shrink-0 mt-0.5" />
-                    <span>
-                      Belum ada barang di daftar pinjam. Scan Kode QR dengan{' '}
-                      <strong className="text-slate-900">Kamera QR</strong> atau pilih barang pada dropdown di atas lalu klik{' '}
-                      <strong className="text-slate-900">+ Tambah Barang</strong>.
-                    </span>
+                  <div className="p-3.5 bg-slate-50 border border-dashed border-slate-300 rounded-lg text-xs text-slate-600">
+                    Belum ada barang yang dicentang. Silakan centang satu atau banyak barang sekaligus pada tabel di atas.
                   </div>
                 ) : (
-                  <div className="divide-y divide-slate-200 border border-slate-200 rounded-lg overflow-hidden bg-slate-50/60">
+                  <div className="divide-y divide-slate-200 border border-slate-200 rounded-lg overflow-hidden bg-white max-h-52 overflow-y-auto">
                     {resolvedCartEntries.map(({ item, quantity: itemQty }) => (
                       <div
                         key={item.id}
-                        className="p-3 flex items-center justify-between gap-3 bg-white hover:bg-slate-50/80"
+                        className="p-2.5 flex items-center justify-between gap-2 text-xs"
                       >
-                        <div className="flex items-center gap-2.5 min-w-0 flex-1">
-                          {item.imageUrl && (
-                            <img
-                              src={item.imageUrl}
-                              alt={item.name}
-                              referrerPolicy="no-referrer"
-                              className="w-10 h-10 rounded-lg object-cover border border-slate-200 shrink-0 bg-slate-100"
-                            />
-                          )}
-                          <div className="min-w-0 flex-1">
-                            <p className="text-xs font-semibold text-slate-900 truncate">
-                              {item.name}
-                            </p>
-                            <p className="text-[11px] font-mono text-slate-500">
-                              {item.qrCode} · Maks {item.availableStock} unit
-                            </p>
-                          </div>
+                        <div className="min-w-0 flex-1">
+                          <span className="font-semibold text-slate-900">
+                            {item.name}
+                          </span>{' '}
+                          <span className="font-mono text-slate-500">
+                            ({item.qrCode})
+                          </span>
                         </div>
-
-                        <div className="flex items-center gap-1.5 shrink-0">
-                          <button
-                            type="button"
-                            onClick={() =>
-                              handleUpdateCartQuantity(item.id, itemQty - 1)
-                            }
-                            aria-label={`Kurangi jumlah ${item.name}`}
-                            className="p-1 rounded border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-700"
-                          >
-                            <Minus className="w-3 h-3" />
-                          </button>
-                          <input
-                            type="number"
-                            min={1}
-                            max={item.availableStock}
-                            value={itemQty}
-                            onChange={(e) =>
-                              handleUpdateCartQuantity(
-                                item.id,
-                                Number.parseInt(e.target.value, 10) || 1
-                              )
-                            }
-                            className="w-12 py-1 text-center text-xs font-mono border border-slate-200 rounded bg-white text-slate-900"
-                          />
-                          <button
-                            type="button"
-                            onClick={() =>
-                              handleUpdateCartQuantity(item.id, itemQty + 1)
-                            }
-                            disabled={itemQty >= item.availableStock}
-                            aria-label={`Tambah jumlah ${item.name}`}
-                            className="p-1 rounded border border-slate-200 bg-slate-50 hover:bg-slate-100 disabled:opacity-40 text-slate-700"
-                          >
-                            <Plus className="w-3 h-3" />
-                          </button>
+                        <div className="flex items-center gap-2 shrink-0">
+                          <span className="font-mono font-semibold text-[#0d113a]">
+                            {itemQty} unit
+                          </span>
                           <button
                             type="button"
                             onClick={() => handleRemoveFromCart(item.id)}
                             aria-label={`Hapus ${item.name} dari daftar`}
-                            className="p-1.5 text-red-600 hover:bg-red-50 rounded ml-1"
+                            className="p-1 text-red-600 hover:bg-red-50 rounded"
                           >
                             <Trash2 className="w-3.5 h-3.5" />
                           </button>
@@ -1195,7 +1460,7 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
             </div>
 
             {/* Right Column: Duration, Notes, and Photo Proof */}
-            <div className="lg:col-span-7 space-y-5">
+            <div className="lg:col-span-6 space-y-5">
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <label
@@ -1213,7 +1478,7 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
                     onChange={(e) =>
                       handleDurationChange(Number.parseInt(e.target.value, 10) || 1)
                     }
-                    className="w-full px-3 py-2 text-xs font-mono bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-[#0d113a] focus:ring-1 focus:ring-[#0d113a]"
+                    className="w-full px-3 py-2 text-xs font-mono bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-[#0d113a]"
                   />
                 </div>
 
@@ -1229,7 +1494,7 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
                     type="date"
                     value={dueDateInput}
                     onChange={(e) => handleDueDateInputChange(e.target.value)}
-                    className="w-full px-3 py-2 text-xs font-mono bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-[#0d113a] focus:ring-1 focus:ring-[#0d113a]"
+                    className="w-full px-3 py-2 text-xs font-mono bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-[#0d113a]"
                   />
                 </div>
               </div>
@@ -1247,7 +1512,7 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
                   value={purposeNotes}
                   onChange={(e) => setPurposeNotes(e.target.value)}
                   placeholder="Jelaskan keperluan pemakaian barang, lokasi kegiatan, dan penanggung jawab..."
-                  className="w-full p-3 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-[#0d113a] focus:ring-1 focus:ring-[#0d113a]"
+                  className="w-full p-3 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-[#0d113a]"
                 />
               </div>
 
@@ -1309,9 +1574,9 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
                   className="inline-flex items-center gap-2 px-5 py-2.5 text-xs font-semibold text-white bg-[#0d113a] hover:bg-[#151c54] rounded-lg transition-colors shadow-xs"
                 >
                   <Package className="w-4 h-4" />
-                  Konfirmasi Peminjaman Barang
+                  Konfirmasi Peminjaman Sekaligus
                   {resolvedCartEntries.length > 0
-                    ? ` (${resolvedCartEntries.length} Barang)`
+                    ? ` (${resolvedCartEntries.length} Barang · ${totalUnitsInCart} Unit)`
                     : ''}
                 </button>
               </div>
@@ -1320,17 +1585,29 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
         </section>
       )}
 
-      {/* TAB 3: RETURN ITEM (SCAN QR + CONDITION NOTES + PHOTO PROOF) */}
+      {/* TAB 3: RETURN ITEM (SUPPORTS MULTI-RETURN & CANCEL/DELETE LOAN) */}
       {activeTab === 'return' && (
         <section
           aria-label="Formulir Pengembalian Barang"
           className="bg-white border border-slate-200 rounded-lg p-6"
         >
-          <div className="pb-4 border-b border-slate-200">
-            <h2 className="text-base font-semibold text-slate-900">
-              Pengembalian Barang Pinjaman
-            </h2>
+          <div className="pb-4 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <h2 className="text-base font-semibold text-slate-900">
+                Pengembalian atau Pembatalan Barang Pinjaman
+              </h2>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Centang satu atau beberapa barang untuk dikembalikan sekaligus, atau klik Batal Pinjam jika ingin menghapus pinjaman
+              </p>
+            </div>
           </div>
+
+          {returnSuccess && (
+            <div className="mt-4 p-3 bg-emerald-50 border border-emerald-200 rounded-lg text-xs font-medium text-emerald-700 flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 shrink-0" />
+              <span>{returnSuccess}</span>
+            </div>
+          )}
 
           {myActiveLoans.length === 0 ? (
             <div className="py-12 text-center space-y-3">
@@ -1345,31 +1622,79 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
               className="mt-6 grid grid-cols-1 lg:grid-cols-12 gap-8"
             >
               <div className="lg:col-span-5 space-y-4">
-                <div>
-                  <label
-                    htmlFor="return-loan-select"
-                    className="block text-xs font-semibold text-slate-800 mb-1.5"
-                  >
-                    1. Pilih Pinjaman Aktif atau Scan Kode QR Barang *
-                  </label>
-                  <select
-                    id="return-loan-select"
-                    value={activeReturnLoan?.id || ''}
-                    onChange={(e) => {
-                      setSelectedReturnLoanId(e.target.value);
-                      const found = myActiveLoans.find(
-                        (l) => l.id === e.target.value
-                      );
-                      if (found) setReturnQrInput(found.itemQrCode);
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-semibold text-slate-800">
+                    1. Centang Barang yang Dikembalikan ({activeReturnLoansList.length} Dipilih)
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (selectedReturnLoanIds.length === myActiveLoans.length) {
+                        setSelectedReturnLoanIds([]);
+                      } else {
+                        setSelectedReturnLoanIds(myActiveLoans.map((l) => l.id));
+                      }
                     }}
-                    className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-[#0d113a] focus:ring-1 focus:ring-[#0d113a]"
+                    className="text-xs font-medium text-sky-700 hover:underline"
                   >
-                    {myActiveLoans.map((l) => (
-                      <option key={l.id} value={l.id}>
-                        {l.itemQrCode} — {l.itemName} ({l.quantity} unit)
-                      </option>
-                    ))}
-                  </select>
+                    {selectedReturnLoanIds.length === myActiveLoans.length
+                      ? 'Batal Pilih Semua'
+                      : 'Pilih Semua Pinjaman'}
+                  </button>
+                </div>
+
+                <div className="divide-y divide-slate-200 border border-slate-200 rounded-lg overflow-hidden max-h-64 overflow-y-auto">
+                  {myActiveLoans.map((l) => {
+                    const isSelected = activeReturnLoansList.some(
+                      (item) => item.id === l.id
+                    );
+                    return (
+                      <div
+                        key={l.id}
+                        onClick={() =>
+                          setSelectedReturnLoanIds((prev) =>
+                            prev.includes(l.id)
+                              ? prev.filter((id) => id !== l.id)
+                              : [...prev, l.id]
+                          )
+                        }
+                        className={`p-3 flex items-center justify-between gap-2 cursor-pointer text-xs ${
+                          isSelected ? 'bg-sky-50/70' : 'bg-white hover:bg-slate-50'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          <input
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={() => {}}
+                            className="rounded border-slate-300 pointer-events-none"
+                          />
+                          <div className="min-w-0">
+                            <p className="font-semibold text-slate-900 truncate">
+                              {l.itemName} ({l.quantity} unit)
+                            </p>
+                            <p className="font-mono text-[11px] text-slate-500">
+                              {l.itemQrCode} · Batas:{' '}
+                              {new Date(l.dueDate).toLocaleDateString('id-ID')}
+                            </p>
+                          </div>
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleCancelSingleLoan(l);
+                          }}
+                          title="Batal pinjam / hapus pinjaman ini"
+                          className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-red-600 bg-red-50 hover:bg-red-100 rounded shrink-0"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                          Batal Pinjam
+                        </button>
+                      </div>
+                    );
+                  })}
                 </div>
 
                 <div>
@@ -1377,16 +1702,16 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
                     htmlFor="return-qr-verify"
                     className="block text-xs font-medium text-slate-700 mb-1"
                   >
-                    Verifikasi Scan Kode QR Barang
+                    Atau Scan Kode QR Barang
                   </label>
                   <div className="flex flex-wrap gap-2">
                     <input
                       id="return-qr-verify"
                       type="text"
-                      value={returnQrInput || activeReturnLoan?.itemQrCode || ''}
+                      value={returnQrInput}
                       onChange={(e) => setReturnQrInput(e.target.value)}
-                      placeholder="Scan Kode QR untuk verifikasi..."
-                      className="flex-1 min-w-[150px] px-3 py-2 text-xs font-mono bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-[#0d113a] focus:ring-1 focus:ring-[#0d113a]"
+                      placeholder="Scan Kode QR..."
+                      className="flex-1 min-w-[150px] px-3 py-2 text-xs font-mono bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-[#0d113a]"
                     />
                     <button
                       type="button"
@@ -1433,26 +1758,6 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
                     </p>
                   </div>
                 )}
-
-                {activeReturnLoan && (
-                  <div className="p-4 bg-slate-50 border border-slate-200 rounded-lg space-y-1.5 text-xs">
-                    <p className="font-mono font-semibold text-[#e71f69]">
-                      {activeReturnLoan.itemQrCode}
-                    </p>
-                    <p className="font-semibold text-slate-900 text-sm">
-                      {activeReturnLoan.itemName}
-                    </p>
-                    <p className="text-slate-600">
-                      Jumlah: {activeReturnLoan.quantity} unit · Jatuh tempo:{' '}
-                      {new Date(activeReturnLoan.dueDate).toLocaleDateString(
-                        'id-ID'
-                      )}
-                    </p>
-                    <p className="text-slate-500">
-                      Catatan Pinjam: {activeReturnLoan.purposeNotes}
-                    </p>
-                  </div>
-                )}
               </div>
 
               <div className="lg:col-span-7 space-y-5">
@@ -1469,7 +1774,7 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
                     value={returnNotes}
                     onChange={(e) => setReturnNotes(e.target.value)}
                     placeholder="Contoh: Dikembalikan lengkap beserta charger dan tas di Kabinet A-01..."
-                    className="w-full p-3 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-[#0d113a] focus:ring-1 focus:ring-[#0d113a]"
+                    className="w-full p-3 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-[#0d113a]"
                   />
                 </div>
 
@@ -1517,20 +1822,13 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
                   </div>
                 )}
 
-                {returnSuccess && (
-                  <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-lg text-xs font-medium text-emerald-700 flex items-center gap-2">
-                    <CheckCircle2 className="w-4 h-4 shrink-0" />
-                    <span>{returnSuccess}</span>
-                  </div>
-                )}
-
-                <div className="pt-2">
+                <div className="pt-2 flex flex-wrap items-center gap-3">
                   <button
                     type="submit"
                     className="inline-flex items-center gap-2 px-5 py-2.5 text-xs font-semibold text-white bg-[#0d113a] hover:bg-[#151c54] rounded-lg transition-colors shadow-xs"
                   >
                     <RotateCcw className="w-4 h-4" />
-                    Selesaikan Pengembalian Barang
+                    Selesaikan Pengembalian ({activeReturnLoansList.length} Barang)
                   </button>
                 </div>
               </div>
@@ -1547,8 +1845,11 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
         >
           <div className="p-5 border-b border-slate-200">
             <h2 className="text-base font-semibold text-slate-900">
-              Kotak Masuk Email
+              Kotak Masuk & Riwayat Email ({currentUser.email})
             </h2>
+            <p className="text-xs text-slate-500 mt-0.5">
+              Seluruh pesan di bawah ini juga dikirimkan secara otomatis ke alamat email/Gmail Anda ({currentUser.email})
+            </p>
           </div>
 
           <div className="divide-y divide-slate-200">

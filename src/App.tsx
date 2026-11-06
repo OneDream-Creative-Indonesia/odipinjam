@@ -196,11 +196,7 @@ export default function App() {
         ? data.emails
         : [];
 
-      const serverIsEmpty =
-        !data.initialized ||
-        (serverUsers.length <= 1 &&
-          serverItems.length === 0 &&
-          serverLoans.length === 0);
+      const serverIsEmpty = !data.initialized;
 
       const local = latestStateRef.current;
       const localHasData =
@@ -481,6 +477,43 @@ export default function App() {
     return { ok: true };
   };
 
+  const handleDeleteLoans = (loanIds: string[]) => {
+    if (!loanIds || loanIds.length === 0) return;
+    const idSet = new Set(loanIds);
+    const restoreQtyByItemId = new Map<string, number>();
+
+    for (const ln of loans) {
+      if (idSet.has(ln.id) && ln.status === 'dipinjam') {
+        restoreQtyByItemId.set(
+          ln.itemId,
+          (restoreQtyByItemId.get(ln.itemId) || 0) + ln.quantity
+        );
+      }
+    }
+
+    const nextItems = items.map((it) => {
+      const addBack = restoreQtyByItemId.get(it.id);
+      if (!addBack) return it;
+      return {
+        ...it,
+        availableStock: Math.min(it.totalStock, it.availableStock + addBack),
+      };
+    });
+
+    const nextLoans = loans.filter((l) => !idSet.has(l.id));
+    setItems(nextItems);
+    setLoans(nextLoans);
+    pushStateToServer({ items: nextItems, loans: nextLoans });
+  };
+
+  const handleDeleteEmails = (emailIds: string[]) => {
+    if (!emailIds || emailIds.length === 0) return;
+    const idSet = new Set(emailIds);
+    const nextEmails = emails.filter((e) => !idSet.has(e.id));
+    setEmails(nextEmails);
+    pushStateToServer({ emails: nextEmails });
+  };
+
   const handleBorrowItem = (payload: {
     item: InventoryItem;
     quantity: number;
@@ -567,55 +600,68 @@ export default function App() {
 
   const handleReturnItem = (payload: {
     loanId: string;
+    loanIds?: string[];
     returnNotes: string;
     returnPhotoDataUrl: string;
   }) => {
-    const targetLoan = loans.find((l) => l.id === payload.loanId);
-    if (!targetLoan || targetLoan.status === 'dikembalikan') return;
+    const targetIds = new Set(
+      payload.loanIds && payload.loanIds.length > 0
+        ? payload.loanIds
+        : [payload.loanId]
+    );
+    const targetLoans = loans.filter(
+      (l) => targetIds.has(l.id) && l.status === 'dipinjam'
+    );
+    if (targetLoans.length === 0) return;
 
     const nowIso = new Date().toISOString();
 
     const nextLoans: LoanRecord[] = loans.map((l) =>
-      l.id === payload.loanId
+      targetIds.has(l.id) && l.status === 'dipinjam'
         ? {
-          ...l,
-          status: 'dikembalikan',
-          returnDate: nowIso,
-          returnNotes: payload.returnNotes,
-          returnPhotoDataUrl: payload.returnPhotoDataUrl,
-        }
+            ...l,
+            status: 'dikembalikan',
+            returnDate: nowIso,
+            returnNotes: payload.returnNotes,
+            returnPhotoDataUrl: payload.returnPhotoDataUrl,
+          }
         : l
     );
 
-    // Increment available stock back in real-time
-    const nextItems = items.map((it) =>
-      it.id === targetLoan.itemId
-        ? {
-          ...it,
-          availableStock: Math.min(
-            it.totalStock,
-            it.availableStock + targetLoan.quantity
-          ),
-        }
-        : it
-    );
+    // Increment available stock back in real-time for all returned loans
+    const returnQtyByItemId = new Map<string, number>();
+    for (const tl of targetLoans) {
+      returnQtyByItemId.set(
+        tl.itemId,
+        (returnQtyByItemId.get(tl.itemId) || 0) + tl.quantity
+      );
+    }
 
-    const returnEmail: EmailNotification = {
-      id: `email-return-${targetLoan.id}-${Date.now()}`,
-      recipientEmail: targetLoan.userEmail,
-      recipientName: targetLoan.userName,
-      userId: targetLoan.userId,
-      loanId: targetLoan.id,
-      itemName: targetLoan.itemName,
-      itemQrCode: targetLoan.itemQrCode,
+    const nextItems = items.map((it) => {
+      const addBack = returnQtyByItemId.get(it.id);
+      if (!addBack) return it;
+      return {
+        ...it,
+        availableStock: Math.min(it.totalStock, it.availableStock + addBack),
+      };
+    });
+
+    const returnEmails: EmailNotification[] = targetLoans.map((tl, idx) => ({
+      id: `email-return-${tl.id}-${Date.now()}-${idx}`,
+      recipientEmail: tl.userEmail,
+      recipientName: tl.userName,
+      userId: tl.userId,
+      loanId: tl.id,
+      itemName: tl.itemName,
+      itemQrCode: tl.itemQrCode,
       type: 'konfirmasi_pengembalian',
-      subject: `[Konfirmasi Pengembalian] ${targetLoan.itemName} (${targetLoan.itemQrCode})`,
-      body: `Halo ${targetLoan.userName},\n\nTerima kasih, barang "${targetLoan.itemName}" (${targetLoan.itemQrCode}) sebanyak ${targetLoan.quantity} unit telah diterima kembali pada ${new Date(nowIso).toLocaleString('id-ID')}.\nCatatan kondisi: ${payload.returnNotes}`,
+      subject: `[Konfirmasi Pengembalian ODipinjam] ${tl.itemName} (${tl.itemQrCode})`,
+      body: `Halo ${tl.userName},\n\nTerima kasih, barang "${tl.itemName}" (${tl.itemQrCode}) sebanyak ${tl.quantity} unit telah diterima kembali pada ${new Date(nowIso).toLocaleString('id-ID')}.\nCatatan kondisi: ${payload.returnNotes}`,
       sentAt: nowIso,
       read: false,
-    };
+    }));
 
-    const nextEmails = [returnEmail, ...emails];
+    const nextEmails = [...returnEmails, ...emails];
 
     setLoans(nextLoans);
     setItems(nextItems);
@@ -1108,6 +1154,9 @@ export default function App() {
                   referenceTimeIso={referenceTimeIso}
                   onRunAutoEmailCheck={handleRunAutoEmailCheck}
                   onSendManualReminder={handleSendManualReminder}
+                  onDeleteLoans={handleDeleteLoans}
+                  onDeleteEmails={handleDeleteEmails}
+                  onRefreshState={pullStateFromServer}
                 />
               )}
               {adminTab === 'users' && (
@@ -1128,6 +1177,9 @@ export default function App() {
                   referenceTimeIso={referenceTimeIso}
                   onRunAutoEmailCheck={handleRunAutoEmailCheck}
                   onSendManualReminder={handleSendManualReminder}
+                  onDeleteLoans={handleDeleteLoans}
+                  onDeleteEmails={handleDeleteEmails}
+                  onRefreshState={pullStateFromServer}
                 />
               )}
             </>
@@ -1142,6 +1194,7 @@ export default function App() {
               referenceTimeIso={referenceTimeIso}
               onBorrowItem={handleBorrowItem}
               onReturnItem={handleReturnItem}
+              onCancelLoans={handleDeleteLoans}
               onMarkEmailsRead={handleMarkEmailsRead}
             />
           )}
