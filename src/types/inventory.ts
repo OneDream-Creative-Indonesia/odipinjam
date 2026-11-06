@@ -84,6 +84,18 @@ export interface EmailNotification {
   body: string;
   sentAt: string;
   read: boolean;
+  deliveryStatus?: 'sent' | 'pending' | 'failed';
+  deliveryError?: string;
+}
+
+export interface SmtpConfig {
+  smtpHost: string;
+  smtpPort: number;
+  smtpSecure: boolean;
+  smtpUser: string;
+  smtpPass: string;
+  senderName: string;
+  enabled: boolean;
 }
 
 export interface MonthlyLoanSummary {

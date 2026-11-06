@@ -82,11 +82,6 @@ export function createEquipmentPhotoProofSvg(params: {
   return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
 }
 
-/**
- * Clean production initial state:
- * Only the primary Administrator account is initialized so the owner can log in
- * and manage real inventory items and real member accounts.
- */
 export const INITIAL_USERS: User[] = [
   {
     id: 'usr-admin-master',
