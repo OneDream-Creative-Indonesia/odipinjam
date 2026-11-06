@@ -119,7 +119,6 @@ export const AdminUsersView: React.FC<AdminUsersViewProps> = ({
         </p>
       </div>
 
-      {/* Registration Form */}
       <section
         aria-label="Form Pendaftaran Anggota Baru"
         className="bg-white border border-slate-200 rounded-lg p-6"
@@ -164,7 +163,7 @@ export const AdminUsersView: React.FC<AdminUsersViewProps> = ({
               type="email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
-              placeholder="dimas.aditya@inventaris.id"
+              placeholder="dimas.aditya@gmail.com"
               className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-sky-600"
             />
           </div>
@@ -262,7 +261,6 @@ export const AdminUsersView: React.FC<AdminUsersViewProps> = ({
         </form>
       </section>
 
-      {/* Registered Users Table */}
       <section
         aria-label="Daftar Pengguna Terdaftar"
         className="bg-white border border-slate-200 rounded-lg overflow-hidden"

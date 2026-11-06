@@ -560,8 +560,6 @@ export function parseSpreadsheetTextToRows(
 
 /**
  * Parses CSV, semicolon-delimited Excel CSV, or TSV spreadsheet rows into inventory items.
- * Expected columns (header optional):
- * Nama Barang, Kategori, Total Stok, Lokasi, Kondisi, Kode QR (opsional), Deskripsi (opsional), Gambar Barang (opsional)
  */
 export function parseBulkInventoryCsv(
   rawText: string,
@@ -799,13 +797,12 @@ export function buildInventoryExcelTemplateXlsx(
     const crc = computeCrc32(entry.data);
     const size = entry.data.length;
 
-    // Local file header (30 bytes + name)
     const localHeader = new Uint8Array(30 + nameBytes.length);
     const lv = new DataView(localHeader.buffer);
     lv.setUint32(0, 0x04034b50, true);
     lv.setUint16(4, 20, true);
     lv.setUint16(6, 0, true);
-    lv.setUint16(8, 0, true); // Store (0)
+    lv.setUint16(8, 0, true);
     lv.setUint16(10, 0, true);
     lv.setUint16(12, 0x5421, true);
     lv.setUint32(14, crc, true);
@@ -817,7 +814,6 @@ export function buildInventoryExcelTemplateXlsx(
 
     localChunks.push(localHeader, entry.data);
 
-    // Central directory header (46 bytes + name)
     const cdHeader = new Uint8Array(46 + nameBytes.length);
     const cv = new DataView(cdHeader.buffer);
     cv.setUint32(0, 0x02014b50, true);
@@ -921,7 +917,6 @@ export async function parseInventoryExcelXlsx(
   const bytes = input instanceof Uint8Array ? input : new Uint8Array(input);
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 
-  // Locate End of Central Directory (0x06054b50)
   let eocdPos = -1;
   for (let i = bytes.length - 22; i >= Math.max(0, bytes.length - 65557); i--) {
     if (view.getUint32(i, true) === 0x06054b50) {
@@ -971,7 +966,6 @@ export async function parseInventoryExcelXlsx(
     }
   }
 
-  // 1. Parse sharedStrings.xml if present
   const sharedStrings: string[] = [];
   const ssBytes = files.get('xl/sharedStrings.xml');
   if (ssBytes) {
@@ -986,7 +980,6 @@ export async function parseInventoryExcelXlsx(
     }
   }
 
-  // 2. Extract embedded images from xl/media/* if user inserted pictures in Excel
   const mediaDataUrls = new Map<string, string>();
   const orderedMediaDataUrls: string[] = [];
   for (const [path, fileBytes] of files.entries()) {
@@ -1004,7 +997,6 @@ export async function parseInventoryExcelXlsx(
     }
   }
 
-  // Map 0-based Excel row index -> embedded image dataUrl via drawing1.xml
   const rowEmbeddedImages = new Map<number, string>();
   const drawingRelsBytes = files.get('xl/drawings/_rels/drawing1.xml.rels');
   const drawingBytes = files.get('xl/drawings/drawing1.xml');
@@ -1044,7 +1036,6 @@ export async function parseInventoryExcelXlsx(
     }
   }
 
-  // 3. Parse first worksheet
   const sheetBytes =
     files.get('xl/worksheets/sheet1.xml') ||
     Array.from(files.entries()).find(([k]) =>
@@ -1121,7 +1112,6 @@ export async function parseInventoryExcelXlsx(
     const embeddedImg = rowEmbeddedImages.get(excelRow0Based);
     let imageUrl = (cols[7] || '').trim() || embeddedImg || '';
 
-    // If user embedded images without drawing anchors (e.g. Place in Cell) and cell is #VALUE! or empty
     if (
       (!imageUrl || imageUrl === '#VALUE!' || imageUrl.startsWith('_xlfn')) &&
       rowEmbeddedImages.size === 0 &&
@@ -1195,7 +1185,7 @@ export function buildAutomatedEmailNotifications(
           itemName: loan.itemName,
           itemQrCode: loan.itemQrCode,
           type: 'batas_waktu_hampir_habis',
-          subject: `[Pengingat SiPinjam] Batas Waktu Peminjaman "${loan.itemName}" Hampir Habis`,
+          subject: `[Pengingat ODipinjam] Batas Waktu Peminjaman "${loan.itemName}" Hampir Habis`,
           body: `Halo ${loan.userName},\n\nKami mengingatkan bahwa masa peminjaman barang "${loan.itemName}" (Kode QR: ${loan.itemQrCode}, Jumlah: ${loan.quantity} unit) akan segera berakhir pada ${dueFormatted} (${dueInfo.label}).\n\nKeperluan Peminjaman: ${loan.purposeNotes}\n\nMohon segera menyiapkan pengembalian barang melalui menu Pengembalian Barang dan melampirkan bukti foto kondisi barang.`,
           sentAt: referenceTimeIso,
           read: false,
@@ -1222,7 +1212,7 @@ export function buildAutomatedEmailNotifications(
           itemQrCode: loan.itemQrCode,
           type: 'belum_dikembalikan',
           subject: `[PERINGATAN] Barang Belum Dikembalikan: "${loan.itemName}" (${loan.itemQrCode})`,
-          body: `Yth. ${loan.userName} (${loan.userDepartment}),\n\nBerdasarkan catatan sistem SiPinjam, barang "${loan.itemName}" (Kode QR: ${loan.itemQrCode}, Jumlah: ${loan.quantity} unit) telah melewati batas waktu pengembalian pada ${dueFormatted} (${dueInfo.label}) dan tercatat BELUM DIKEMBALIKAN.\n\nMohon segera mengembalikan barang ke lokasi penyimpanan dan melakukan scan QR pengembalian beserta bukti foto.`,
+          body: `Yth. ${loan.userName} (${loan.userDepartment}),\n\nBerdasarkan catatan sistem ODipinjam, barang "${loan.itemName}" (Kode QR: ${loan.itemQrCode}, Jumlah: ${loan.quantity} unit) telah melewati batas waktu pengembalian pada ${dueFormatted} (${dueInfo.label}) dan tercatat BELUM DIKEMBALIKAN.\n\nMohon segera mengembalikan barang ke lokasi penyimpanan dan melakukan scan QR pengembalian beserta bukti foto.`,
           sentAt: referenceTimeIso,
           read: false,
         };
@@ -1250,9 +1240,6 @@ const INDONESIAN_MONTHS = [
   'Desember',
 ];
 
-/**
- * Aggregates loan records into monthly reports sorted newest first.
- */
 export function computeMonthlyLoanReport(
   loans: LoanRecord[],
   referenceTimeIso: string = new Date().toISOString()
@@ -1331,9 +1318,6 @@ export function computeMonthlyLoanReport(
   return summaries.sort((a, b) => b.monthKey.localeCompare(a.monthKey));
 }
 
-/**
- * Validates member borrow submission.
- */
 export function validateBorrowRequest(params: {
   item?: InventoryItem;
   quantity: number;
@@ -1384,9 +1368,6 @@ export function validateBorrowRequest(params: {
   return { valid: true };
 }
 
-/**
- * Authenticates a user by email and password, optionally enforcing the selected login role tab.
- */
 export function authenticateUser(
   users: User[],
   email: string,

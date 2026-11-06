@@ -29,7 +29,6 @@ test('generateQrMatrix produces deterministic 21x21 boolean matrix with finder p
   assert.equal(m1.length, 21);
   assert.equal(m1[0].length, 21);
   assert.deepEqual(m1, m2);
-  // Top-left finder corner should be true
   assert.equal(m1[0][0], true);
   assert.equal(m1[3][3], true);
 });
@@ -84,7 +83,7 @@ test('buildAutomatedEmailNotifications dispatches emails for expiring and overdu
       userDepartment: 'Tim Media',
       quantity: 1,
       borrowDate: '2026-10-28T10:00:00.000Z',
-      dueDate: '2026-10-31T04:00:00.000Z', // 18 hours left
+      dueDate: '2026-10-31T04:00:00.000Z',
       durationDays: 3,
       purposeNotes: 'Liputan acara konferensi',
       borrowPhotoDataUrl: 'data:image/svg+xml;utf8,<svg></svg>',
@@ -102,7 +101,7 @@ test('buildAutomatedEmailNotifications dispatches emails for expiring and overdu
       userDepartment: 'Dokumentasi',
       quantity: 1,
       borrowDate: '2026-10-24T10:00:00.000Z',
-      dueDate: '2026-10-28T10:00:00.000Z', // 48 hours overdue
+      dueDate: '2026-10-28T10:00:00.000Z',
       durationDays: 4,
       purposeNotes: 'Dokumentasi lapangan',
       borrowPhotoDataUrl: 'data:image/svg+xml;utf8,<svg></svg>',
@@ -238,7 +237,7 @@ test('authenticateUser verifies credentials and active status', () => {
 });
 
 test('formatDateInputLocal and parseLocalEndOfDayIso preserve local calendar date without shifting', () => {
-  const localDate = new Date(2026, 9, 31, 14, 30, 0); // Oct 31, 2026
+  const localDate = new Date(2026, 9, 31, 14, 30, 0);
   const formatted = formatDateInputLocal(localDate);
   assert.equal(formatted, '2026-10-31');
 
@@ -269,7 +268,6 @@ test('SAMPLE_BULK_CSV_TEMPLATE uses column separation (semicolon + sep=;) instea
 test('buildInventoryExcelTemplateXlsx and parseInventoryExcelXlsx round-trip columns and physical image URL', async () => {
   const xlsxBytes = buildInventoryExcelTemplateXlsx(SAMPLE_BULK_TEMPLATE_ROWS);
   assert.ok(xlsxBytes.length > 500);
-  // PKZIP signature
   assert.equal(xlsxBytes[0], 0x50);
   assert.equal(xlsxBytes[1], 0x4b);
 

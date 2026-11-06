@@ -155,7 +155,6 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
 
   return (
     <div className="space-y-8">
-      {/* Top KPI Grid */}
       <section aria-label="Ringkasan Metrik Real-Time">
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           <div className="bg-white border border-slate-200 rounded-lg p-5">
@@ -237,7 +236,6 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
         </div>
       </section>
 
-      {/* Automated Email Alert Strip */}
       {(stats.overdueCount > 0 || stats.dueSoonCount > 0) && (
         <section
           aria-label="Status Pengingat Email Otomatis"
@@ -287,7 +285,6 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
         </section>
       )}
 
-      {/* Real-Time Inventory Tracking Table */}
       <section
         aria-label="Pelacakan Ketersediaan Inventaris Real-Time"
         className="bg-white border border-slate-200 rounded-lg overflow-hidden"
@@ -467,7 +464,6 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
         </div>
       </section>
 
-      {/* Monthly Loan Report Section */}
       <section
         aria-label="Laporan Peminjaman Bulanan"
         className="bg-white border border-slate-200 rounded-lg overflow-hidden"
@@ -571,7 +567,6 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
           </table>
         </div>
 
-        {/* Filtered Month Transaction Detail Preview */}
         <div className="p-4 bg-slate-50/60 border-t border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs text-slate-600">
           <span>
             Menampilkan{' '}
