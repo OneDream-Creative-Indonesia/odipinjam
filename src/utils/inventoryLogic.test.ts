@@ -9,6 +9,7 @@ import {
   formatDateInputLocal,
   generateQrCodeString,
   generateQrMatrix,
+  normalizeGoogleDriveImageUrl,
   parseBulkInventoryCsv,
   parseInventoryExcelXlsx,
   parseLocalEndOfDayIso,
@@ -29,6 +30,7 @@ test('generateQrMatrix produces deterministic 21x21 boolean matrix with finder p
   assert.equal(m1.length, 21);
   assert.equal(m1[0].length, 21);
   assert.deepEqual(m1, m2);
+  // Top-left finder corner should be true
   assert.equal(m1[0][0], true);
   assert.equal(m1[3][3], true);
 });
@@ -83,7 +85,7 @@ test('buildAutomatedEmailNotifications dispatches emails for expiring and overdu
       userDepartment: 'Tim Media',
       quantity: 1,
       borrowDate: '2026-10-28T10:00:00.000Z',
-      dueDate: '2026-10-31T04:00:00.000Z',
+      dueDate: '2026-10-31T04:00:00.000Z', // 18 hours left
       durationDays: 3,
       purposeNotes: 'Liputan acara konferensi',
       borrowPhotoDataUrl: 'data:image/svg+xml;utf8,<svg></svg>',
@@ -101,7 +103,7 @@ test('buildAutomatedEmailNotifications dispatches emails for expiring and overdu
       userDepartment: 'Dokumentasi',
       quantity: 1,
       borrowDate: '2026-10-24T10:00:00.000Z',
-      dueDate: '2026-10-28T10:00:00.000Z',
+      dueDate: '2026-10-28T10:00:00.000Z', // 48 hours overdue
       durationDays: 4,
       purposeNotes: 'Dokumentasi lapangan',
       borrowPhotoDataUrl: 'data:image/svg+xml;utf8,<svg></svg>',
@@ -237,7 +239,7 @@ test('authenticateUser verifies credentials and active status', () => {
 });
 
 test('formatDateInputLocal and parseLocalEndOfDayIso preserve local calendar date without shifting', () => {
-  const localDate = new Date(2026, 9, 31, 14, 30, 0);
+  const localDate = new Date(2026, 9, 31, 14, 30, 0); // Oct 31, 2026
   const formatted = formatDateInputLocal(localDate);
   assert.equal(formatted, '2026-10-31');
 
@@ -268,6 +270,7 @@ test('SAMPLE_BULK_CSV_TEMPLATE uses column separation (semicolon + sep=;) instea
 test('buildInventoryExcelTemplateXlsx and parseInventoryExcelXlsx round-trip columns and physical image URL', async () => {
   const xlsxBytes = buildInventoryExcelTemplateXlsx(SAMPLE_BULK_TEMPLATE_ROWS);
   assert.ok(xlsxBytes.length > 500);
+  // PKZIP signature
   assert.equal(xlsxBytes[0], 0x50);
   assert.equal(xlsxBytes[1], 0x4b);
 
@@ -283,4 +286,33 @@ test('buildInventoryExcelTemplateXlsx and parseInventoryExcelXlsx round-trip col
   assert.equal(validated.errors.length, 0);
   assert.equal(validated.items.length, 3);
   assert.equal(validated.items[0].imageUrl, SAMPLE_BULK_TEMPLATE_ROWS[0].imageUrl);
+});
+
+test('normalizeGoogleDriveImageUrl converts various Google Drive sharing links to direct thumbnail URLs', () => {
+  const link1 = 'https://drive.google.com/file/d/1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms/view?usp=sharing';
+  assert.equal(
+    normalizeGoogleDriveImageUrl(link1),
+    'https://drive.google.com/thumbnail?id=1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms&sz=w1000'
+  );
+
+  const link2 = 'https://drive.google.com/file/d/1abcDEF-123_xyz/view';
+  assert.equal(
+    normalizeGoogleDriveImageUrl(link2),
+    'https://drive.google.com/thumbnail?id=1abcDEF-123_xyz&sz=w1000'
+  );
+
+  const link3 = 'https://drive.google.com/open?id=1abcDEF-123_xyz';
+  assert.equal(
+    normalizeGoogleDriveImageUrl(link3),
+    'https://drive.google.com/thumbnail?id=1abcDEF-123_xyz&sz=w1000'
+  );
+
+  const link4 = 'https://drive.google.com/uc?id=1abcDEF-123_xyz&export=download';
+  assert.equal(
+    normalizeGoogleDriveImageUrl(link4),
+    'https://drive.google.com/thumbnail?id=1abcDEF-123_xyz&sz=w1000'
+  );
+
+  const normalUrl = 'https://images.unsplash.com/photo-1516035069371';
+  assert.equal(normalizeGoogleDriveImageUrl(normalUrl), normalUrl);
 });
