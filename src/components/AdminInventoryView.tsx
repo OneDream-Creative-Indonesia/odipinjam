@@ -3,6 +3,7 @@ import { BulkInventoryRowInput, InventoryItem } from '../types/inventory';
 import {
   buildInventoryExcelTemplateXlsx,
   generateQrCodeString,
+  handleDriveImageError,
   normalizeGoogleDriveImageUrl,
   parseInventoryExcelXlsx,
   parseSpreadsheetTextToRows,
@@ -15,8 +16,11 @@ import {
 } from '../data/seedData';
 import { QrCodeSvg } from './QrCodeSvg';
 import {
+  AlertTriangle,
+  ArrowUpDown,
   CheckCircle2,
   Download,
+  ExternalLink,
   FileSpreadsheet,
   Image as ImageIcon,
   Pencil,
@@ -178,6 +182,7 @@ export const AdminInventoryView: React.FC<AdminInventoryViewProps> = ({
   // Table filter state
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState('ALL');
+  const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc');
 
   const previewQrCode = useMemo(() => {
     if (customQr.trim()) return customQr.trim().toUpperCase();
@@ -215,7 +220,7 @@ export const AdminInventoryView: React.FC<AdminInventoryViewProps> = ({
   }, [items]);
 
   const filteredItems = useMemo(() => {
-    return items.filter((item) => {
+    const matched = items.filter((item) => {
       if (selectedCategory !== 'ALL' && item.category !== selectedCategory) {
         return false;
       }
@@ -225,10 +230,16 @@ export const AdminInventoryView: React.FC<AdminInventoryViewProps> = ({
         item.name.toLowerCase().includes(q) ||
         item.qrCode.toLowerCase().includes(q) ||
         item.location.toLowerCase().includes(q) ||
-        item.category.toLowerCase().includes(q)
+        item.category.toLowerCase().includes(q) ||
+        item.description.toLowerCase().includes(q)
       );
     });
-  }, [items, selectedCategory, searchQuery]);
+
+    return [...matched].sort((a, b) => {
+      const cmp = a.name.localeCompare(b.name, 'id', { sensitivity: 'base' });
+      return sortOrder === 'asc' ? cmp : -cmp;
+    });
+  }, [items, selectedCategory, searchQuery, sortOrder]);
 
   const handleSingleImageUpload = async (
     e: React.ChangeEvent<HTMLInputElement>
@@ -776,9 +787,12 @@ export const AdminInventoryView: React.FC<AdminInventoryViewProps> = ({
                               className="w-11 h-11 rounded-lg border border-slate-200 overflow-hidden shrink-0 bg-slate-100 relative group"
                             >
                               <img
-                                src={row.imageUrl}
+                                src={normalizeGoogleDriveImageUrl(row.imageUrl)}
                                 alt={row.name || 'Pratinjau barang'}
                                 referrerPolicy="no-referrer"
+                                onError={(e) =>
+                                  handleDriveImageError(e, row.imageUrl, row.name)
+                                }
                                 className="w-full h-full object-cover"
                               />
                             </button>
@@ -1318,6 +1332,18 @@ export const AdminInventoryView: React.FC<AdminInventoryViewProps> = ({
               />
             </div>
 
+            <button
+              type="button"
+              onClick={() =>
+                setSortOrder((prev) => (prev === 'asc' ? 'desc' : 'asc'))
+              }
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors whitespace-nowrap shrink-0"
+              title="Urutkan berdasarkan Nama Barang"
+            >
+              <ArrowUpDown className="w-3.5 h-3.5 text-[#0d113a]" />
+              Urutkan Nama ({sortOrder === 'asc' ? 'A–Z' : 'Z–A'})
+            </button>
+
             <select
               id="inventory-category-select"
               name="inventoryCategory"
@@ -1351,37 +1377,145 @@ export const AdminInventoryView: React.FC<AdminInventoryViewProps> = ({
           <table className="w-full text-left border-collapse">
             <thead>
               <tr className="border-b border-slate-200 bg-slate-50/70 text-xs font-medium text-slate-500">
-                <th className="py-3 px-4">QR & Kode</th>
-                <th className="py-3 px-4">Foto Fisik & Nama Barang</th>
-                <th className="py-3 px-4">Kategori · Lokasi · Kondisi</th>
-                <th className="py-3 px-4 text-right">Tersedia / Total</th>
-                <th className="py-3 px-4 text-right">Kelola Stok & QR</th>
+                <th className="py-3 px-4">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setSortOrder((prev) => (prev === 'asc' ? 'desc' : 'asc'))
+                    }
+                    className="inline-flex items-center gap-1 font-medium text-slate-700 hover:text-slate-900"
+                  >
+                    Nama Barang
+                    <ArrowUpDown className="w-3 h-3" />
+                  </button>
+                </th>
+                <th className="py-3 px-4">Kategori</th>
+                <th className="py-3 px-4">Lokasi</th>
+                <th className="py-3 px-4 text-right">Tersedia</th>
+                <th className="py-3 px-4 text-right">Jumlah Unit</th>
+                <th className="py-3 px-4">Status Ketersediaan</th>
+                <th className="py-3 px-4 text-center">Lihat Foto QR</th>
+                <th className="py-3 px-4 text-center">Lihat Foto</th>
+                <th className="py-3 px-4">Deskripsi</th>
+                <th className="py-3 px-4 text-right">Kelola</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-200 text-xs">
               {filteredItems.length === 0 ? (
                 <tr>
-                  <td colSpan={5} className="py-10 text-center text-slate-500">
+                  <td colSpan={10} className="py-10 text-center text-slate-500">
                     Belum ada barang di dalam daftar inventaris. Silakan daftarkan barang di atas atau gunakan fitur Bulk Import Template Excel/Kolom.
                   </td>
                 </tr>
               ) : (
-                filteredItems.map((item) => (
-                  <tr
-                    key={item.id}
-                    className="hover:bg-slate-50/80 transition-colors"
-                  >
-                    <td className="py-3 px-4">
-                      <div className="flex items-center gap-3">
-                        <QrCodeSvg value={item.qrCode} size={42} />
-                        <span className="font-mono font-semibold text-slate-900 tabular-nums whitespace-nowrap">
-                          {item.qrCode}
-                        </span>
-                      </div>
-                    </td>
-                    <td className="py-3 px-4">
-                      <div className="flex items-center gap-3">
-                        {item.imageUrl ? (
+                filteredItems.map((item) => {
+                  const borrowedCount = item.totalStock - item.availableStock;
+                  const isEmpty = item.availableStock === 0;
+                  const normalizedImg = item.imageUrl
+                    ? normalizeGoogleDriveImageUrl(item.imageUrl)
+                    : '';
+                  return (
+                    <tr
+                      key={item.id}
+                      className="hover:bg-slate-50/80 transition-colors"
+                    >
+                      <td className="py-3 px-4">
+                        <div className="flex items-center gap-3">
+                          {normalizedImg ? (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setPreviewImageItem({
+                                  name: item.name,
+                                  qrCode: item.qrCode,
+                                  imageUrl: item.imageUrl!,
+                                })
+                              }
+                              title="Klik untuk melihat foto fisik barang"
+                              className="w-11 h-11 rounded-lg border border-slate-200 overflow-hidden shrink-0 bg-slate-100 hover:opacity-90 transition-opacity"
+                            >
+                              <img
+                                src={normalizedImg}
+                                alt={item.name}
+                                referrerPolicy="no-referrer"
+                                onError={(e) =>
+                                  handleDriveImageError(e, item.imageUrl, item.name)
+                                }
+                                className="w-full h-full object-cover"
+                              />
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => handleOpenEditModal(item)}
+                              title="Klik untuk menambahkan foto fisik barang"
+                              className="w-11 h-11 rounded-lg border border-dashed border-slate-300 bg-slate-50 hover:bg-slate-100 flex flex-col items-center justify-center shrink-0 text-slate-400 transition-colors"
+                            >
+                              <ImageIcon className="w-4 h-4" />
+                              <span className="text-[9px] mt-0.5">+ Foto</span>
+                            </button>
+                          )}
+                          <div className="min-w-0">
+                            <p className="font-semibold text-slate-900">
+                              {item.name}
+                            </p>
+                            <p className="font-mono text-[11px] text-slate-500 mt-0.5">
+                              {item.qrCode} ·{' '}
+                              <span
+                                className={
+                                  item.condition === 'Baik'
+                                    ? 'text-emerald-700'
+                                    : 'text-amber-700'
+                                }
+                              >
+                                {item.condition}
+                              </span>
+                            </p>
+                          </div>
+                        </div>
+                      </td>
+                      <td className="py-3 px-4 text-slate-700 whitespace-nowrap">
+                        {item.category}
+                      </td>
+                      <td className="py-3 px-4 text-slate-600 whitespace-nowrap">
+                        {item.location}
+                      </td>
+                      <td className="py-3 px-4 text-right font-mono font-semibold text-slate-900 tabular-nums whitespace-nowrap">
+                        {item.availableStock}
+                      </td>
+                      <td className="py-3 px-4 text-right font-mono text-slate-600 tabular-nums whitespace-nowrap">
+                        {item.totalStock}
+                      </td>
+                      <td className="py-3 px-4 whitespace-nowrap">
+                        {isEmpty ? (
+                          <span className="inline-flex items-center gap-1.5 text-red-600 font-medium">
+                            <AlertTriangle className="w-3.5 h-3.5" />
+                            Habis Dipinjam ({borrowedCount} unit)
+                          </span>
+                        ) : borrowedCount > 0 ? (
+                          <span className="inline-flex items-center gap-1.5 text-emerald-700 font-medium">
+                            <CheckCircle2 className="w-3.5 h-3.5" />
+                            Tersedia · {borrowedCount} dipinjam
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1.5 text-emerald-700 font-medium">
+                            <CheckCircle2 className="w-3.5 h-3.5" />
+                            Stok Penuh
+                          </span>
+                        )}
+                      </td>
+                      <td className="py-3 px-4 text-center whitespace-nowrap">
+                        <button
+                          type="button"
+                          onClick={() => onInspectQr(item)}
+                          className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-sky-700 bg-sky-50 hover:bg-sky-100 rounded-md transition-colors whitespace-nowrap shrink-0"
+                        >
+                          <QrCode className="w-3.5 h-3.5" />
+                          Lihat Foto QR
+                        </button>
+                      </td>
+                      <td className="py-3 px-4 text-center whitespace-nowrap">
+                        {normalizedImg ? (
                           <button
                             type="button"
                             onClick={() =>
@@ -1391,112 +1525,69 @@ export const AdminInventoryView: React.FC<AdminInventoryViewProps> = ({
                                 imageUrl: item.imageUrl!,
                               })
                             }
-                            title="Klik untuk melihat foto fisik barang"
-                            className="w-12 h-12 rounded-lg border border-slate-200 overflow-hidden shrink-0 bg-slate-100 hover:opacity-90 transition-opacity"
+                            className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-[#0d113a] bg-[#0d113a]/10 hover:bg-[#0d113a]/15 rounded-md transition-colors whitespace-nowrap shrink-0"
                           >
-                            <img
-                              src={item.imageUrl}
-                              alt={item.name}
-                              referrerPolicy="no-referrer"
-                              className="w-full h-full object-cover"
-                            />
+                            <ImageIcon className="w-3.5 h-3.5 text-[#e71f69]" />
+                            Lihat Foto
                           </button>
                         ) : (
                           <button
                             type="button"
                             onClick={() => handleOpenEditModal(item)}
-                            title="Klik untuk menambahkan foto fisik barang"
-                            className="w-12 h-12 rounded-lg border border-dashed border-slate-300 bg-slate-50 hover:bg-slate-100 flex flex-col items-center justify-center shrink-0 text-slate-400 transition-colors"
+                            className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-slate-500 bg-slate-100 hover:bg-slate-200 rounded-md transition-colors whitespace-nowrap shrink-0"
                           >
-                            <ImageIcon className="w-4 h-4" />
-                            <span className="text-[9px] mt-0.5">+ Foto</span>
+                            + Tambah Foto
                           </button>
                         )}
-                        <div className="min-w-0">
-                          <p className="font-semibold text-slate-900">
-                            {item.name}
-                          </p>
-                          <p className="text-slate-500 line-clamp-1 mt-0.5">
-                            {item.description}
-                          </p>
+                      </td>
+                      <td className="py-3 px-4 text-slate-600 max-w-xs">
+                        <p className="line-clamp-2" title={item.description}>
+                          {item.description || '-'}
+                        </p>
+                      </td>
+                      <td className="py-3 px-4 text-right whitespace-nowrap">
+                        <div className="inline-flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            disabled={
+                              item.availableStock <= 0 || item.totalStock <= 1
+                            }
+                            onClick={() => onUpdateItemStock(item.id, -1)}
+                            aria-label={`Kurangi stok ${item.name}`}
+                            className="px-2 py-1 text-xs font-mono font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 disabled:opacity-40 rounded transition-colors"
+                          >
+                            -1
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => onUpdateItemStock(item.id, 1)}
+                            aria-label={`Tambah stok ${item.name}`}
+                            className="px-2 py-1 text-xs font-mono font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded transition-colors"
+                          >
+                            +1
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleOpenEditModal(item)}
+                            aria-label={`Edit ${item.name}`}
+                            className="inline-flex items-center gap-1 px-2 py-1 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded transition-colors"
+                          >
+                            <Pencil className="w-3.5 h-3.5" />
+                            Edit
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteClick(item)}
+                            aria-label={`Hapus ${item.name}`}
+                            className="p-1.5 text-slate-400 hover:text-red-600 rounded hover:bg-red-50 transition-colors"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
                         </div>
-                      </div>
-                    </td>
-                    <td className="py-3 px-4 text-slate-600 whitespace-nowrap">
-                      <span>{item.category}</span>
-                      <span aria-hidden="true" className="mx-1.5 text-slate-300">
-                        ·
-                      </span>
-                      <span>{item.location}</span>
-                      <span aria-hidden="true" className="mx-1.5 text-slate-300">
-                        ·
-                      </span>
-                      <span
-                        className={
-                          item.condition === 'Baik'
-                            ? 'text-emerald-700 font-medium'
-                            : 'text-amber-700 font-medium'
-                        }
-                      >
-                        {item.condition}
-                      </span>
-                    </td>
-                    <td className="py-3 px-4 text-right font-mono tabular-nums whitespace-nowrap">
-                      <span className="font-semibold text-slate-900">
-                        {item.availableStock}
-                      </span>
-                      <span className="text-slate-400"> / {item.totalStock}</span>
-                    </td>
-                    <td className="py-3 px-4 text-right whitespace-nowrap">
-                      <div className="inline-flex items-center gap-1.5">
-                        <button
-                          type="button"
-                          disabled={
-                            item.availableStock <= 0 || item.totalStock <= 1
-                          }
-                          onClick={() => onUpdateItemStock(item.id, -1)}
-                          aria-label={`Kurangi stok ${item.name}`}
-                          className="px-2 py-1 text-xs font-mono font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 disabled:opacity-40 rounded transition-colors"
-                        >
-                          -1 Stok
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => onUpdateItemStock(item.id, 1)}
-                          aria-label={`Tambah stok ${item.name}`}
-                          className="px-2 py-1 text-xs font-mono font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded transition-colors"
-                        >
-                          +1 Stok
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleOpenEditModal(item)}
-                          aria-label={`Edit ${item.name}`}
-                          className="inline-flex items-center gap-1 px-2 py-1 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded transition-colors"
-                        >
-                          <Pencil className="w-3.5 h-3.5" />
-                          Edit
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => onInspectQr(item)}
-                          className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-sky-700 bg-sky-50 hover:bg-sky-100 rounded transition-colors"
-                        >
-                          <QrCode className="w-3.5 h-3.5" />
-                          Cetak QR
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleDeleteClick(item)}
-                          aria-label={`Hapus ${item.name}`}
-                          className="p-1.5 text-slate-400 hover:text-red-600 rounded hover:bg-red-50 transition-colors"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))
+                      </td>
+                    </tr>
+                  );
+                })
               )}
             </tbody>
           </table>
@@ -1666,9 +1757,12 @@ export const AdminInventoryView: React.FC<AdminInventoryViewProps> = ({
                 {editImageUrl && (
                   <div className="w-full h-36 rounded-lg overflow-hidden border border-slate-200 bg-white">
                     <img
-                      src={editImageUrl}
+                      src={normalizeGoogleDriveImageUrl(editImageUrl)}
                       alt={editName}
                       referrerPolicy="no-referrer"
+                      onError={(e) =>
+                        handleDriveImageError(e, editImageUrl, editName)
+                      }
                       className="w-full h-full object-cover"
                     />
                   </div>
@@ -1757,14 +1851,34 @@ export const AdminInventoryView: React.FC<AdminInventoryViewProps> = ({
                 <X className="w-4 h-4" />
               </button>
             </div>
-            <div className="rounded-lg overflow-hidden border border-slate-200 bg-slate-100 max-h-96 flex items-center justify-center">
+            <div className="rounded-lg overflow-hidden border border-slate-200 bg-slate-100 max-h-96 flex items-center justify-center min-h-[240px]">
               <img
-                src={previewImageItem.imageUrl}
+                src={normalizeGoogleDriveImageUrl(previewImageItem.imageUrl)}
                 alt={previewImageItem.name}
                 referrerPolicy="no-referrer"
+                onError={(e) =>
+                  handleDriveImageError(
+                    e,
+                    previewImageItem.imageUrl,
+                    previewImageItem.name
+                  )
+                }
                 className="w-full max-h-96 object-contain"
               />
             </div>
+            {previewImageItem.imageUrl.startsWith('http') && (
+              <div className="flex justify-end pt-1">
+                <a
+                  href={previewImageItem.imageUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1.5 text-xs font-medium text-[#e71f69] hover:underline"
+                >
+                  <ExternalLink className="w-3.5 h-3.5" />
+                  Buka Sumber Gambar Asli
+                </a>
+              </div>
+            )}
           </div>
         </div>
       )}

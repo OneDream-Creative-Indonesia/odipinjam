@@ -1,13 +1,6 @@
 @import "tailwindcss";
 
 @theme {
-  --color-primary: #0d113a;
-  --color-primary-hover: #151a54;
-  --color-primary-light: #1e256f;
-  --color-secondary: #e71f69;
-  --color-secondary-hover: #cf165b;
-  --color-secondary-light: #fdf2f6;
-
   --font-display: "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, sans-serif;
   --font-sans: "DM Sans", -apple-system, BlinkMacSystemFont, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
@@ -28,3 +21,4 @@
 .tabular-nums {
   font-variant-numeric: tabular-nums;
 }
+

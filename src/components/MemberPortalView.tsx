@@ -7,26 +7,26 @@ import {
 } from '../types/inventory';
 import {
   calculateDueState,
+  handleDriveImageError,
+  normalizeGoogleDriveImageUrl,
   validateBorrowRequest,
 } from '../utils/inventoryLogic';
-import { createEquipmentPhotoProofSvg } from '../data/seedData';
 import { QrCodeSvg } from './QrCodeSvg';
 import {
   AlertTriangle,
   Camera,
   CheckCircle2,
-  CheckSquare,
   Clock,
   Mail,
   Minus,
   Package,
   Plus,
-  QrCode,
+  RefreshCw,
   RotateCcw,
   ScanLine,
-  Search,
   Trash2,
   Upload,
+  X,
 } from 'lucide-react';
 
 interface MemberPortalViewProps {
@@ -57,6 +57,62 @@ interface MemberPortalViewProps {
   onMarkEmailsRead: (userId: string) => void;
 }
 
+/**
+ * Compresses & resizes an uploaded or captured photo file via HTML5 Canvas
+ * so high-resolution phone photos (5MB–15MB) become crisp ~80KB JPEG data URLs
+ * that save and display reliably in MySQL and localStorage.
+ */
+function compressPhotoFile(
+  file: File,
+  maxDimension = 960,
+  quality = 0.82
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('Gagal membaca file foto.'));
+    reader.onload = (evt) => {
+      const rawDataUrl = String(evt.target?.result || '');
+      if (!rawDataUrl.startsWith('data:image/')) {
+        reject(new Error('Format file bukan gambar/foto yang valid.'));
+        return;
+      }
+      const img = new Image();
+      img.onload = () => {
+        try {
+          let { width, height } = img;
+          if (width > maxDimension || height > maxDimension) {
+            if (width >= height) {
+              height = Math.round((height * maxDimension) / width);
+              width = maxDimension;
+            } else {
+              width = Math.round((width * maxDimension) / height);
+              height = maxDimension;
+            }
+          }
+          const canvas = document.createElement('canvas');
+          canvas.width = Math.max(1, width);
+          canvas.height = Math.max(1, height);
+          const ctx = canvas.getContext('2d');
+          if (!ctx) {
+            resolve(rawDataUrl);
+            return;
+          }
+          ctx.fillStyle = '#ffffff';
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          const compressed = canvas.toDataURL('image/jpeg', quality);
+          resolve(compressed);
+        } catch {
+          resolve(rawDataUrl);
+        }
+      };
+      img.onerror = () => resolve(rawDataUrl);
+      img.src = rawDataUrl;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
 export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
   currentUser,
   activeTab,
@@ -70,14 +126,12 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
   onCancelLoans,
   onMarkEmailsRead,
 }) => {
-  // Borrow form state
+  // Borrow form state (Scan QR -> Adjust Quantity -> Confirm Loan)
   const [scannedQrCode, setScannedQrCode] = useState('');
   const [quantity, setQuantity] = useState(1);
   const [borrowCart, setBorrowCart] = useState<
     Array<{ itemId: string; quantity: number }>
   >([]);
-  const [quickChecklistSearch, setQuickChecklistSearch] = useState('');
-  const [catalogSearch, setCatalogSearch] = useState('');
   const [durationDays, setDurationDays] = useState(3);
   const [dueDateInput, setDueDateInput] = useState(() => {
     const dt = new Date(new Date(referenceTimeIso).getTime() + 3 * 86400 * 1000);
@@ -88,17 +142,40 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
   const [borrowError, setBorrowError] = useState<string | null>(null);
   const [borrowSuccess, setBorrowSuccess] = useState<string | null>(null);
   const [catalogFeedback, setCatalogFeedback] = useState<string | null>(null);
-  const [cameraTarget, setCameraTarget] = useState<'borrow' | 'return' | null>(null);
+
+  // QR Scanner Camera state
+  const [cameraTarget, setCameraTarget] = useState<'borrow' | 'return' | null>(
+    null
+  );
   const [cameraStatusMsg, setCameraStatusMsg] = useState<string | null>(null);
   const [scanSuccessMsg, setScanSuccessMsg] = useState<string | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
 
-  // Active Loans multi-selection in Catalog & Return tabs
+  // Live WebRTC Photo Proof Camera state (for taking real Borrow / Return photos)
+  const [photoCameraTarget, setPhotoCameraTarget] = useState<
+    'borrow' | 'return' | null
+  >(null);
+  const [photoCameraFacing, setPhotoCameraFacing] = useState<
+    'environment' | 'user'
+  >('environment');
+  const [photoCameraError, setPhotoCameraError] = useState<string | null>(null);
+  const photoVideoRef = useRef<HTMLVideoElement | null>(null);
+  const photoStreamRef = useRef<MediaStream | null>(null);
+
+  // File input refs for reliable photo uploading & native camera fallback
+  const borrowFileInputRef = useRef<HTMLInputElement | null>(null);
+  const borrowNativeCameraInputRef = useRef<HTMLInputElement | null>(null);
+  const returnFileInputRef = useRef<HTMLInputElement | null>(null);
+  const returnNativeCameraInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Active Loans multi-selection in My Loans & Return tabs
   const [selectedMyLoanIds, setSelectedMyLoanIds] = useState<string[]>([]);
 
   // Return form state (supports single or multi-loan return)
-  const [selectedReturnLoanIds, setSelectedReturnLoanIds] = useState<string[]>([]);
+  const [selectedReturnLoanIds, setSelectedReturnLoanIds] = useState<string[]>(
+    []
+  );
   const [returnQrInput, setReturnQrInput] = useState<string>('');
   const [returnNotes, setReturnNotes] = useState<string>('');
   const [returnPhotoDataUrl, setReturnPhotoDataUrl] = useState<string>('');
@@ -127,37 +204,9 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
 
   const matchedItem = useMemo(() => {
     const clean = scannedQrCode.trim().toLowerCase();
+    if (!clean) return undefined;
     return items.find((i) => i.qrCode.toLowerCase() === clean);
   }, [items, scannedQrCode]);
-
-  const availableItems = useMemo(
-    () => items.filter((i) => i.availableStock > 0),
-    [items]
-  );
-
-  const filteredQuickChecklistItems = useMemo(() => {
-    const q = quickChecklistSearch.trim().toLowerCase();
-    if (!q) return availableItems;
-    return availableItems.filter(
-      (i) =>
-        i.name.toLowerCase().includes(q) ||
-        i.qrCode.toLowerCase().includes(q) ||
-        i.category.toLowerCase().includes(q) ||
-        i.location.toLowerCase().includes(q)
-    );
-  }, [availableItems, quickChecklistSearch]);
-
-  const filteredCatalogItems = useMemo(() => {
-    const q = catalogSearch.trim().toLowerCase();
-    if (!q) return items;
-    return items.filter(
-      (i) =>
-        i.name.toLowerCase().includes(q) ||
-        i.qrCode.toLowerCase().includes(q) ||
-        i.category.toLowerCase().includes(q) ||
-        i.location.toLowerCase().includes(q)
-    );
-  }, [items, catalogSearch]);
 
   const resolvedCartEntries = useMemo(() => {
     return borrowCart
@@ -169,7 +218,9 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
           quantity: Math.max(1, Math.min(item.availableStock, entry.quantity)),
         };
       })
-      .filter((x): x is { item: InventoryItem; quantity: number } => x !== null);
+      .filter(
+        (x): x is { item: InventoryItem; quantity: number } => x !== null
+      );
   }, [borrowCart, items]);
 
   const totalUnitsInCart = useMemo(
@@ -180,7 +231,9 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
   const handleAddToBorrowCart = useCallback(
     (item: InventoryItem, addQty = 1) => {
       if (item.availableStock <= 0) {
-        setBorrowError(`Barang "${item.name}" sedang tidak tersedia untuk dipinjam.`);
+        setBorrowError(
+          `Barang "${item.name}" (${item.qrCode}) sedang habis / tidak tersedia.`
+        );
         return;
       }
       setBorrowError(null);
@@ -207,47 +260,6 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
     },
     []
   );
-
-  const handleToggleItemInCart = (item: InventoryItem) => {
-    setBorrowError(null);
-    setBorrowSuccess(null);
-    setBorrowCart((prev) => {
-      const exists = prev.some((e) => e.itemId === item.id);
-      if (exists) {
-        return prev.filter((e) => e.itemId !== item.id);
-      }
-      if (item.availableStock <= 0) return prev;
-      return [...prev, { itemId: item.id, quantity: 1 }];
-    });
-  };
-
-  const handleSelectAllFilteredItemsToCart = () => {
-    setBorrowError(null);
-    setBorrowSuccess(null);
-    const allSelected =
-      filteredQuickChecklistItems.length > 0 &&
-      filteredQuickChecklistItems.every((it) =>
-        borrowCart.some((c) => c.itemId === it.id)
-      );
-
-    if (allSelected) {
-      const removeSet = new Set(filteredQuickChecklistItems.map((i) => i.id));
-      setBorrowCart((prev) => prev.filter((c) => !removeSet.has(c.itemId)));
-    } else {
-      setBorrowCart((prev) => {
-        const map = new Map(prev.map((c) => [c.itemId, c.quantity]));
-        for (const it of filteredQuickChecklistItems) {
-          if (it.availableStock > 0 && !map.has(it.id)) {
-            map.set(it.id, 1);
-          }
-        }
-        return Array.from(map.entries()).map(([itemId, qty]) => ({
-          itemId,
-          quantity: qty,
-        }));
-      });
-    }
-  };
 
   const handleUpdateCartQuantity = (itemId: string, nextQty: number) => {
     const item = items.find((i) => i.id === itemId);
@@ -283,8 +295,6 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
     }
     return myActiveLoans.length > 0 ? [myActiveLoans[0]] : [];
   }, [myActiveLoans, selectedReturnLoanIds, returnQrInput]);
-
-  const activeReturnLoan = activeReturnLoansList[0] || null;
 
   const handleCancelSingleLoan = (loan: LoanRecord) => {
     onCancelLoans([loan.id]);
@@ -329,6 +339,7 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
     setDurationDays(days);
   };
 
+  // Stop QR scanner camera
   const handleStopCameraScan = useCallback(() => {
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((t) => t.stop());
@@ -340,6 +351,145 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
     setCameraTarget(null);
   }, []);
 
+  // Stop Photo Proof live camera
+  const handleStopPhotoCamera = useCallback(() => {
+    if (photoStreamRef.current) {
+      photoStreamRef.current.getTracks().forEach((t) => t.stop());
+      photoStreamRef.current = null;
+    }
+    if (photoVideoRef.current) {
+      photoVideoRef.current.srcObject = null;
+    }
+    setPhotoCameraTarget(null);
+  }, []);
+
+  // Start Live WebRTC Camera for taking Borrow / Return photo proof
+  const handleStartPhotoCamera = useCallback(
+    async (
+      target: 'borrow' | 'return',
+      facing: 'environment' | 'user' = photoCameraFacing
+    ) => {
+      setPhotoCameraError(null);
+      if (target === 'borrow') setBorrowError(null);
+      else setReturnError(null);
+
+      handleStopCameraScan();
+      handleStopPhotoCamera();
+
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        // Fallback to native mobile camera input if WebRTC is unavailable
+        if (target === 'borrow') {
+          borrowNativeCameraInputRef.current?.click();
+        } else {
+          returnNativeCameraInputRef.current?.click();
+        }
+        return;
+      }
+
+      try {
+        let stream: MediaStream;
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: {
+              facingMode: { ideal: facing },
+              width: { ideal: 1280 },
+              height: { ideal: 720 },
+            },
+            audio: false,
+          });
+        } catch {
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: true,
+            audio: false,
+          });
+        }
+        photoStreamRef.current = stream;
+        setPhotoCameraFacing(facing);
+        setPhotoCameraTarget(target);
+      } catch {
+        setPhotoCameraError(
+          'Kamera langsung tidak dapat diakses di browser ini. Membuka kamera/galeri perangkat...'
+        );
+        if (target === 'borrow') {
+          borrowNativeCameraInputRef.current?.click();
+        } else {
+          returnNativeCameraInputRef.current?.click();
+        }
+      }
+    },
+    [photoCameraFacing, handleStopCameraScan, handleStopPhotoCamera]
+  );
+
+  // Attach photo stream to <video> element when photoCameraTarget is active
+  useEffect(() => {
+    if (!photoCameraTarget || !photoStreamRef.current) return;
+    const videoEl = photoVideoRef.current;
+    if (!videoEl) return;
+
+    videoEl.srcObject = photoStreamRef.current;
+    videoEl.setAttribute('playsinline', 'true');
+    videoEl.play().catch(() => {});
+  }, [photoCameraTarget, photoCameraFacing]);
+
+  // Capture real frame from Live Photo Camera
+  const handleSnapPhotoFromLiveCamera = (target: 'borrow' | 'return') => {
+    const v = photoVideoRef.current;
+    if (!v || v.videoWidth === 0 || v.videoHeight === 0) {
+      setPhotoCameraError(
+        'Kamera sedang memuat gambar, tunggu 1 detik lalu tekan Jepret Foto kembali.'
+      );
+      return;
+    }
+
+    const maxDim = 960;
+    let width = v.videoWidth;
+    let height = v.videoHeight;
+    if (width > maxDim || height > maxDim) {
+      if (width >= height) {
+        height = Math.round((height * maxDim) / width);
+        width = maxDim;
+      } else {
+        width = Math.round((width * maxDim) / height);
+        height = maxDim;
+      }
+    }
+
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, width);
+    canvas.height = Math.max(1, height);
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    // Draw live video frame
+    ctx.drawImage(v, 0, 0, canvas.width, canvas.height);
+
+    // Draw subtle bottom watermark bar with timestamp & user name
+    const barHeight = 36;
+    ctx.fillStyle = 'rgba(13, 17, 58, 0.75)';
+    ctx.fillRect(0, canvas.height - barHeight, canvas.width, barHeight);
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 12px -apple-system, BlinkMacSystemFont, sans-serif';
+    const modeLabel =
+      target === 'borrow' ? 'BUKTI AMBIL BARANG' : 'BUKTI PENGEMBALIAN';
+    const timeStr = new Date().toLocaleString('id-ID');
+    ctx.fillText(
+      `${modeLabel} · ${currentUser.name} · ${timeStr}`,
+      12,
+      canvas.height - 13
+    );
+
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.84);
+    if (target === 'borrow') {
+      setBorrowPhotoDataUrl(dataUrl);
+      setBorrowError(null);
+    } else {
+      setReturnPhotoDataUrl(dataUrl);
+      setReturnError(null);
+    }
+
+    handleStopPhotoCamera();
+  };
+
   const applyDecodedQrResult = useCallback(
     (rawValue: string, target: 'borrow' | 'return') => {
       const code = rawValue.trim().toUpperCase();
@@ -350,17 +500,27 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
         // ignore
       }
       if (target === 'borrow') {
-        setScannedQrCode(code);
         const foundItem = items.find(
           (i) => i.qrCode.toLowerCase() === code.toLowerCase()
         );
-        if (foundItem && foundItem.availableStock > 0) {
-          handleAddToBorrowCart(foundItem, 1);
-          setScanSuccessMsg(
-            `Berhasil memindai "${foundItem.name}" (${code}) & ditambahkan ke daftar pinjam!`
-          );
+        if (foundItem) {
+          if (foundItem.availableStock > 0) {
+            handleAddToBorrowCart(foundItem, 1);
+            setScannedQrCode('');
+            setScanSuccessMsg(
+              `Berhasil scan "${foundItem.name}" (${foundItem.qrCode}). Silakan atur jumlah unit di bawah!`
+            );
+          } else {
+            setScannedQrCode(code);
+            setBorrowError(
+              `Barang "${foundItem.name}" (${foundItem.qrCode}) saat ini sedang habis dipinjam.`
+            );
+          }
         } else {
-          setScanSuccessMsg(`Berhasil memindai Kode QR: ${code}`);
+          setScannedQrCode(code);
+          setBorrowError(
+            `Kode QR "${code}" tidak ditemukan di dalam database inventaris.`
+          );
         }
       } else {
         setReturnQrInput(code);
@@ -387,7 +547,9 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
 
       const Win = window as unknown as {
         BarcodeDetector?: new (opts?: { formats: string[] }) => {
-          detect: (source: HTMLCanvasElement) => Promise<Array<{ rawValue?: string }>>;
+          detect: (
+            source: HTMLCanvasElement
+          ) => Promise<Array<{ rawValue?: string }>>;
         };
         jsQR?: (
           data: Uint8ClampedArray,
@@ -471,6 +633,10 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
         streamRef.current.getTracks().forEach((t) => t.stop());
         streamRef.current = null;
       }
+      if (photoStreamRef.current) {
+        photoStreamRef.current.getTracks().forEach((t) => t.stop());
+        photoStreamRef.current = null;
+      }
     };
   }, [activeTab]);
 
@@ -485,6 +651,7 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
       return;
     }
 
+    handleStopPhotoCamera();
     handleStopCameraScan();
 
     try {
@@ -548,41 +715,31 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
     img.onerror = () => {
       URL.revokeObjectURL(objectUrl);
       setCameraStatusMsg('Gagal memuat gambar Kode QR.');
+      e.target.value = '';
     };
     img.src = objectUrl;
   };
 
-  const handleBorrowPhotoFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+  // Upload or native camera capture for Borrow Photo Proof
+  const handleBorrowPhotoFile = async (
+    e: React.ChangeEvent<HTMLInputElement>
+  ) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (ev) => {
-      setBorrowPhotoDataUrl(String(ev.target?.result || ''));
-    };
-    reader.readAsDataURL(file);
-  };
-
-  const handleCaptureInstantBorrowPhoto = () => {
-    const targetItem = resolvedCartEntries[0]?.item || matchedItem;
-    if (!targetItem) {
+    setBorrowError(null);
+    try {
+      const compressedDataUrl = await compressPhotoFile(file);
+      setBorrowPhotoDataUrl(compressedDataUrl);
+      handleStopPhotoCamera();
+    } catch (err) {
       setBorrowError(
-        'Silakan centang/tambahkan minimal 1 barang terlebih dahulu sebelum mengambil bukti foto.'
+        err instanceof Error
+          ? err.message
+          : 'Gagal memproses file foto bukti peminjaman.'
       );
-      return;
+    } finally {
+      e.target.value = '';
     }
-    const titleLabel =
-      resolvedCartEntries.length > 1
-        ? `${targetItem.name} (+${resolvedCartEntries.length - 1} barang lainnya)`
-        : targetItem.name;
-    const svgUrl = createEquipmentPhotoProofSvg({
-      title: titleLabel,
-      qrCode: targetItem.qrCode,
-      actorName: currentUser.name,
-      timestampLabel: new Date().toLocaleString('id-ID'),
-      badgeText: 'BUKTI FOTO PINJAM',
-      accentHex: '#0284c7',
-    });
-    setBorrowPhotoDataUrl(svgUrl);
   };
 
   const handleSubmitBorrow = (e: React.FormEvent) => {
@@ -602,7 +759,7 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
 
     if (entriesToBorrow.length === 0) {
       setBorrowError(
-        'Silakan pilih/centang minimal 1 barang yang akan dipinjam pada daftar barang di samping.'
+        'Silakan Scan Kode QR barang terlebih dahulu sebelum melakukan konfirmasi pinjaman.'
       );
       return;
     }
@@ -642,7 +799,7 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
       .join(', ');
 
     setBorrowSuccess(
-      `Peminjaman ${entriesToBorrow.length} jenis barang [${summaryNames}] berhasil dicatat sekaligus & bukti dikirim ke email Anda!`
+      `Peminjaman ${entriesToBorrow.length} jenis barang [${summaryNames}] berhasil dikonfirmasi & bukti dikirim ke email Anda!`
     );
     setBorrowCart([]);
     setScannedQrCode('');
@@ -651,31 +808,26 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
     setQuantity(1);
   };
 
-  const handleReturnPhotoFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+  // Upload or native camera capture for Return Photo Proof
+  const handleReturnPhotoFile = async (
+    e: React.ChangeEvent<HTMLInputElement>
+  ) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (ev) => {
-      setReturnPhotoDataUrl(String(ev.target?.result || ''));
-    };
-    reader.readAsDataURL(file);
-  };
-
-  const handleCaptureInstantReturnPhoto = () => {
-    if (!activeReturnLoan) return;
-    const titleLabel =
-      activeReturnLoansList.length > 1
-        ? `${activeReturnLoan.itemName} (+${activeReturnLoansList.length - 1} barang lainnya)`
-        : activeReturnLoan.itemName;
-    const svgUrl = createEquipmentPhotoProofSvg({
-      title: titleLabel,
-      qrCode: activeReturnLoan.itemQrCode,
-      actorName: currentUser.name,
-      timestampLabel: new Date().toLocaleString('id-ID'),
-      badgeText: 'BUKTI FOTO KEMBALI',
-      accentHex: '#16a34a',
-    });
-    setReturnPhotoDataUrl(svgUrl);
+    setReturnError(null);
+    try {
+      const compressedDataUrl = await compressPhotoFile(file);
+      setReturnPhotoDataUrl(compressedDataUrl);
+      handleStopPhotoCamera();
+    } catch (err) {
+      setReturnError(
+        err instanceof Error
+          ? err.message
+          : 'Gagal memproses file foto bukti pengembalian.'
+      );
+    } finally {
+      e.target.value = '';
+    }
   };
 
   const handleSubmitReturn = (e: React.FormEvent) => {
@@ -689,7 +841,7 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
     }
     if (!returnPhotoDataUrl) {
       setReturnError(
-        'Bukti foto pengembalian barang wajib dilampirkan sebelum menyelesaikan pengembalian.'
+        'Bukti foto pengembalian barang wajib diambil/diunggah sebelum menyelesaikan pengembalian.'
       );
       return;
     }
@@ -766,9 +918,9 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
         </section>
       )}
 
-      {/* TAB 1: CATALOG & MY LOANS */}
+      {/* TAB 1: MY ACTIVE LOANS (TANPA LIST SELURUH BARANG) */}
       {activeTab === 'catalog' && (
-        <div className="space-y-8">
+        <div className="space-y-6">
           {catalogFeedback && (
             <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-3.5 text-xs font-medium text-emerald-800 flex items-center gap-2">
               <CheckCircle2 className="w-4 h-4 shrink-0" />
@@ -787,7 +939,7 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
                   Barang yang Kamu Pinjam ({myActiveLoans.length})
                 </h2>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  Anda dapat mengembalikan barang atau membatalkan/menghapus pinjaman jika salah input
+                  Untuk meminjam barang baru, gunakan tombol <strong>Scan QR untuk Pinjam Barang</strong>
                 </p>
               </div>
               <div className="flex flex-wrap items-center gap-2">
@@ -819,8 +971,8 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
                   onClick={() => onChangeTab('borrow')}
                   className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-white bg-[#0d113a] hover:bg-[#151c54] rounded-lg whitespace-nowrap shrink-0 shadow-xs"
                 >
-                  <ScanLine className="w-3.5 h-3.5" />
-                  Pinjam Banyak Barang Sekaligus
+                  <ScanLine className="w-3.5 h-3.5 text-[#e71f69]" />
+                  Scan QR untuk Pinjam Barang
                 </button>
               </div>
             </div>
@@ -854,8 +1006,18 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
                 <tbody className="divide-y divide-slate-200 text-xs">
                   {myActiveLoans.length === 0 ? (
                     <tr>
-                      <td colSpan={6} className="py-8 text-center text-slate-500">
-                        Anda tidak memiliki peminjaman aktif saat ini.
+                      <td colSpan={6} className="py-10 text-center text-slate-500">
+                        <p className="font-medium text-slate-700">
+                          Anda tidak memiliki peminjaman aktif saat ini.
+                        </p>
+                        <button
+                          type="button"
+                          onClick={() => onChangeTab('borrow')}
+                          className="mt-3 inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-[#0d113a] hover:bg-[#151c54] rounded-lg shadow-xs"
+                        >
+                          <ScanLine className="w-4 h-4 text-[#e71f69]" />
+                          Mulai Scan QR Barang untuk Meminjam
+                        </button>
                       </td>
                     </tr>
                   ) : (
@@ -953,201 +1115,27 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
               </table>
             </div>
           </section>
-
-          {/* Available Inventory Catalog for Members */}
-          <section
-            aria-label="Katalog Barang Tersedia"
-            className="bg-white border border-slate-200 rounded-lg overflow-hidden"
-          >
-            <div className="p-5 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-              <div>
-                <h2 className="text-base font-semibold text-slate-900">
-                  Pilih & Centang Banyak Barang untuk Dipinjam ({availableItems.length} Tersedia)
-                </h2>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  Centang beberapa barang sekaligus lalu klik <strong>Lanjut Pinjam Sekaligus</strong> di kanan atas.
-                </p>
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <div className="relative">
-                  <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-                  <input
-                    type="text"
-                    value={catalogSearch}
-                    onChange={(e) => setCatalogSearch(e.target.value)}
-                    placeholder="Cari nama / kode barang..."
-                    className="pl-8 pr-3 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-[#0d113a]"
-                  />
-                </div>
-                {resolvedCartEntries.length > 0 && (
-                  <button
-                    type="button"
-                    onClick={() => onChangeTab('borrow')}
-                    className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-white bg-[#e71f69] hover:bg-[#cf165b] rounded-lg whitespace-nowrap shrink-0 shadow-xs"
-                  >
-                    <Package className="w-3.5 h-3.5" />
-                    Lanjut Pinjam Sekaligus ({resolvedCartEntries.length} Barang · {totalUnitsInCart} Unit)
-                  </button>
-                )}
-              </div>
-            </div>
-
-            <div className="overflow-x-auto">
-              <table className="w-full text-left border-collapse">
-                <thead>
-                  <tr className="border-b border-slate-200 bg-slate-50/70 text-xs font-medium text-slate-500">
-                    <th className="py-3 px-4 w-10">Pilih</th>
-                    <th className="py-3 px-4">Nama & Kode Barang</th>
-                    <th className="py-3 px-4">Kategori · Lokasi</th>
-                    <th className="py-3 px-4">Stok Tersedia</th>
-                    <th className="py-3 px-4 text-right">Jumlah Pinjam</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-200 text-xs">
-                  {filteredCatalogItems.length === 0 ? (
-                    <tr>
-                      <td colSpan={5} className="py-8 text-center text-slate-500">
-                        Tidak ada barang yang cocok dengan pencarian.
-                      </td>
-                    </tr>
-                  ) : (
-                    filteredCatalogItems.map((item) => {
-                      const inCart = borrowCart.find((c) => c.itemId === item.id);
-                      const isAvailable = item.availableStock > 0;
-                      return (
-                        <tr
-                          key={item.id}
-                          className={`hover:bg-slate-50/80 ${
-                            inCart ? 'bg-sky-50/60' : ''
-                          }`}
-                        >
-                          <td className="py-3 px-4">
-                            <input
-                              type="checkbox"
-                              disabled={!isAvailable}
-                              checked={Boolean(inCart)}
-                              onChange={() => handleToggleItemInCart(item)}
-                              aria-label={`Pilih ${item.name}`}
-                              className="rounded border-slate-300 w-4 h-4"
-                            />
-                          </td>
-                          <td className="py-3 px-4">
-                            <div className="flex items-center gap-3">
-                              {item.imageUrl && (
-                                <img
-                                  src={item.imageUrl}
-                                  alt={item.name}
-                                  referrerPolicy="no-referrer"
-                                  className="w-11 h-11 rounded-lg object-cover border border-slate-200 shrink-0 bg-slate-100"
-                                />
-                              )}
-                              <div>
-                                <p className="font-semibold text-slate-900">
-                                  {item.name}
-                                </p>
-                                <p className="font-mono text-slate-500 mt-0.5 tabular-nums">
-                                  {item.qrCode}
-                                </p>
-                              </div>
-                            </div>
-                          </td>
-                          <td className="py-3 px-4 text-slate-600">
-                            {item.category} · {item.location}
-                          </td>
-                          <td className="py-3 px-4 whitespace-nowrap">
-                            {isAvailable ? (
-                              <span className="inline-flex items-center gap-1 font-mono font-semibold text-emerald-700">
-                                {item.availableStock} / {item.totalStock} unit
-                              </span>
-                            ) : (
-                              <span className="inline-flex items-center gap-1 font-medium text-red-600">
-                                Habis / Tidak Tersedia
-                              </span>
-                            )}
-                          </td>
-                          <td className="py-3 px-4 text-right whitespace-nowrap">
-                            {inCart ? (
-                              <div className="inline-flex items-center gap-1.5">
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    handleUpdateCartQuantity(
-                                      item.id,
-                                      inCart.quantity - 1
-                                    )
-                                  }
-                                  className="p-1 rounded border border-slate-200 bg-white hover:bg-slate-100"
-                                >
-                                  <Minus className="w-3 h-3" />
-                                </button>
-                                <input
-                                  type="number"
-                                  min={1}
-                                  max={item.availableStock}
-                                  value={inCart.quantity}
-                                  onChange={(e) =>
-                                    handleUpdateCartQuantity(
-                                      item.id,
-                                      Number.parseInt(e.target.value, 10) || 1
-                                    )
-                                  }
-                                  className="w-12 py-1 text-center text-xs font-mono border border-slate-200 rounded bg-white"
-                                />
-                                <button
-                                  type="button"
-                                  disabled={inCart.quantity >= item.availableStock}
-                                  onClick={() =>
-                                    handleUpdateCartQuantity(
-                                      item.id,
-                                      inCart.quantity + 1
-                                    )
-                                  }
-                                  className="p-1 rounded border border-slate-200 bg-white hover:bg-slate-100 disabled:opacity-40"
-                                >
-                                  <Plus className="w-3 h-3" />
-                                </button>
-                              </div>
-                            ) : (
-                              <button
-                                type="button"
-                                disabled={!isAvailable}
-                                onClick={() => handleAddToBorrowCart(item, 1)}
-                                className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-white bg-[#0d113a] hover:bg-[#151c54] disabled:bg-slate-200 disabled:text-slate-400 rounded-md transition-colors shadow-xs"
-                              >
-                                <Plus className="w-3.5 h-3.5 text-[#e71f69]" />
-                                Pilih Pinjam
-                              </button>
-                            )}
-                          </td>
-                        </tr>
-                      );
-                    })
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </section>
         </div>
       )}
 
-      {/* TAB 2: BORROW ITEM (MULTI-ITEM CHECKLIST + SCAN QR + DURATION + NOTES + PHOTO PROOF) */}
+      {/* TAB 2: BORROW ITEM (HANYA SCAN QR -> TAMBAH JUMLAH -> KONFIRMASI PINJAMAN) */}
       {activeTab === 'borrow' && (
         <section
-          aria-label="Formulir Peminjaman Banyak Barang Sekaligus"
+          aria-label="Formulir Peminjaman Barang via Scan QR"
           className="bg-white border border-slate-200 rounded-lg p-6"
         >
           <div className="pb-4 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2">
             <div>
               <h2 className="text-base font-semibold text-slate-900">
-                Formulir Pinjam Banyak Barang Sekaligus
+                Scan Kode QR Barang & Konfirmasi Pinjaman
               </h2>
               <p className="text-xs text-slate-500 mt-0.5">
-                Centang banyak barang sekaligus dari daftar di bawah atau Scan Kode QR, lalu cukup isi 1x durasi, keperluan, dan bukti foto untuk semua barang.
+                Scan Kode QR pada barang yang ingin dipinjam, atur jumlah unit, ambil bukti foto pengambilan barang, lalu klik <strong>Konfirmasi Pinjaman</strong>.
               </p>
             </div>
             {resolvedCartEntries.length > 0 && (
               <span className="px-3 py-1 text-xs font-semibold rounded-full bg-[#0d113a] text-white">
-                {resolvedCartEntries.length} Jenis Barang ({totalUnitsInCart} Unit) Dipilih
+                {resolvedCartEntries.length} Jenis Barang ({totalUnitsInCart} Unit) Siap Dipinjam
               </span>
             )}
           </div>
@@ -1156,28 +1144,18 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
             onSubmit={handleSubmitBorrow}
             className="mt-6 grid grid-cols-1 lg:grid-cols-12 gap-8"
           >
-            {/* Left Column: Multi-Select Checklist & QR Scanner */}
+            {/* Left Column: Only Scan QR & Adjust Quantity of Scanned Items */}
             <div className="lg:col-span-6 space-y-5">
-              {/* Method A: Scan QR Code */}
-              <div>
+              {/* Step 1: Scan QR Code */}
+              <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl space-y-3">
                 <label
                   htmlFor="scan-qr-input"
-                  className="block text-xs font-semibold text-slate-800 mb-1.5"
+                  className="block text-xs font-semibold text-slate-900"
                 >
-                  1. Scan Kode QR Barang (Otomatis Masuk Daftar Pinjam)
+                  1. Scan Kode QR Barang
                 </label>
+
                 <div className="flex flex-wrap gap-2">
-                  <input
-                    id="scan-qr-input"
-                    type="text"
-                    value={scannedQrCode}
-                    onChange={(e) => {
-                      setScannedQrCode(e.target.value);
-                      setScanSuccessMsg(null);
-                    }}
-                    placeholder="Scan atau ketik Kode QR..."
-                    className="flex-1 min-w-[150px] px-3 py-2 text-xs font-mono bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-[#0d113a]"
-                  />
                   <button
                     type="button"
                     onClick={() =>
@@ -1185,14 +1163,17 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
                         ? handleStopCameraScan()
                         : handleStartCameraScan('borrow')
                     }
-                    className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-white bg-[#0d113a] hover:bg-[#151c54] rounded-lg transition-colors whitespace-nowrap shrink-0 shadow-xs"
+                    className="inline-flex items-center gap-1.5 px-4 py-2.5 text-xs font-semibold text-white bg-[#0d113a] hover:bg-[#151c54] rounded-lg transition-colors whitespace-nowrap shrink-0 shadow-xs"
                   >
-                    <ScanLine className="w-3.5 h-3.5 text-[#e71f69]" />
-                    {cameraTarget === 'borrow' ? 'Tutup Kamera' : 'Kamera QR'}
+                    <ScanLine className="w-4 h-4 text-[#e71f69]" />
+                    {cameraTarget === 'borrow'
+                      ? 'Tutup Kamera QR'
+                      : 'Buka Kamera Scan QR'}
                   </button>
-                  <label className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-slate-800 bg-slate-100 hover:bg-slate-200 rounded-lg cursor-pointer transition-colors whitespace-nowrap shrink-0">
-                    <Camera className="w-3.5 h-3.5 text-[#e71f69]" />
-                    Foto QR
+
+                  <label className="inline-flex items-center gap-1.5 px-3.5 py-2.5 text-xs font-medium text-slate-800 bg-white hover:bg-slate-100 border border-slate-200 rounded-lg cursor-pointer transition-colors whitespace-nowrap shrink-0">
+                    <Camera className="w-4 h-4 text-[#e71f69]" />
+                    Scan dari Foto QR
                     <input
                       type="file"
                       accept="image/*"
@@ -1202,212 +1183,126 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
                     />
                   </label>
                 </div>
-              </div>
 
-              {cameraTarget === 'borrow' && (
-                <div className="p-3 bg-slate-900 rounded-lg text-center space-y-2 relative overflow-hidden">
-                  <div className="relative rounded overflow-hidden border border-slate-700 bg-black">
-                    <video
-                      ref={videoRef}
-                      autoPlay
-                      playsInline
-                      muted
-                      className="w-full h-56 object-cover"
-                    />
-                    <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-                      <div className="w-40 h-40 border-2 border-[#e71f69] rounded-lg shadow-[0_0_0_9999px_rgba(0,0,0,0.35)]" />
-                    </div>
-                  </div>
-                  <p className="text-xs text-slate-200">
-                    Arahkan kamera ke Kode QR pada barang...
-                  </p>
-                </div>
-              )}
-
-              {scanSuccessMsg && (
-                <div className="p-2.5 bg-emerald-50 border border-emerald-200 rounded-lg text-xs font-medium text-emerald-700 flex items-center gap-2">
-                  <CheckCircle2 className="w-4 h-4 shrink-0" />
-                  <span>{scanSuccessMsg}</span>
-                </div>
-              )}
-
-              {cameraStatusMsg && (
-                <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-2.5">
-                  {cameraStatusMsg}
-                </p>
-              )}
-
-              {scannedQrCode.trim() !== '' && matchedItem && (
-                <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-lg flex items-center justify-between gap-3">
-                  <div className="flex items-center gap-3">
-                    {matchedItem.imageUrl ? (
-                      <img
-                        src={matchedItem.imageUrl}
-                        alt={matchedItem.name}
-                        referrerPolicy="no-referrer"
-                        className="w-12 h-12 rounded-lg object-cover border border-slate-200 shrink-0 bg-white"
-                      />
-                    ) : (
-                      <QrCodeSvg value={matchedItem.qrCode} size={48} />
-                    )}
-                    <div className="text-xs">
-                      <span className="font-mono font-semibold text-[#e71f69]">
-                        TERDETEKSI · {matchedItem.qrCode}
-                      </span>
-                      <p className="font-semibold text-slate-900">
-                        {matchedItem.name}
-                      </p>
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      handleAddToBorrowCart(matchedItem, 1);
-                      setScannedQrCode('');
-                    }}
-                    className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-semibold text-white bg-[#e71f69] hover:bg-[#cf165b] rounded-lg shrink-0"
-                  >
-                    <Plus className="w-3.5 h-3.5" />
-                    Tambah
-                  </button>
-                </div>
-              )}
-
-              {/* Method B: Multi-Item Checklist Table (Centang Banyak Barang Sekaligus) */}
-              <div className="pt-2 border-t border-slate-200 space-y-2.5">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <label className="text-xs font-semibold text-slate-800 flex items-center gap-1.5">
-                    <CheckSquare className="w-3.5 h-3.5 text-[#e71f69]" />
-                    2. Centang Banyak Barang Sekaligus ({availableItems.length} Tersedia)
-                  </label>
-                  <button
-                    type="button"
-                    onClick={handleSelectAllFilteredItemsToCart}
-                    className="text-xs font-medium text-sky-700 hover:underline"
-                  >
-                    {filteredQuickChecklistItems.length > 0 &&
-                    filteredQuickChecklistItems.every((it) =>
-                      borrowCart.some((c) => c.itemId === it.id)
-                    )
-                      ? 'Batal Pilih Semua'
-                      : 'Pilih Semua Barang'}
-                  </button>
-                </div>
-
-                <div className="relative">
-                  <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                <div className="flex gap-2 pt-1">
                   <input
+                    id="scan-qr-input"
                     type="text"
-                    value={quickChecklistSearch}
-                    onChange={(e) => setQuickChecklistSearch(e.target.value)}
-                    placeholder="Ketik nama barang / kategori / kode QR untuk memfilter..."
-                    className="w-full pl-8 pr-3 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-[#0d113a]"
+                    value={scannedQrCode}
+                    onChange={(e) => {
+                      setScannedQrCode(e.target.value);
+                      setScanSuccessMsg(null);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && matchedItem) {
+                        e.preventDefault();
+                        handleAddToBorrowCart(matchedItem, 1);
+                        setScannedQrCode('');
+                      }
+                    }}
+                    placeholder="Atau gunakan alat scanner / ketik Kode QR..."
+                    className="flex-1 min-w-[150px] px-3 py-2 text-xs font-mono bg-white border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-[#0d113a]"
                   />
-                </div>
-
-                <div className="border border-slate-200 rounded-lg max-h-64 overflow-y-auto divide-y divide-slate-200 bg-white">
-                  {filteredQuickChecklistItems.length === 0 ? (
-                    <div className="p-4 text-center text-xs text-slate-500">
-                      Tidak ada barang tersedia yang cocok dengan pencarian.
-                    </div>
-                  ) : (
-                    filteredQuickChecklistItems.map((item) => {
-                      const cartEntry = borrowCart.find(
-                        (c) => c.itemId === item.id
-                      );
-                      const isChecked = Boolean(cartEntry);
-                      return (
-                        <div
-                          key={item.id}
-                          onClick={() => handleToggleItemInCart(item)}
-                          className={`p-2.5 flex items-center justify-between gap-3 cursor-pointer transition-colors ${
-                            isChecked ? 'bg-sky-50/70' : 'hover:bg-slate-50'
-                          }`}
-                        >
-                          <div className="flex items-center gap-2.5 min-w-0 flex-1">
-                            <input
-                              type="checkbox"
-                              checked={isChecked}
-                              onChange={() => {}}
-                              className="rounded border-slate-300 w-4 h-4 shrink-0 pointer-events-none"
-                            />
-                            {item.imageUrl && (
-                              <img
-                                src={item.imageUrl}
-                                alt={item.name}
-                                referrerPolicy="no-referrer"
-                                className="w-9 h-9 rounded object-cover border border-slate-200 shrink-0 bg-slate-100"
-                              />
-                            )}
-                            <div className="min-w-0 flex-1">
-                              <p className="text-xs font-semibold text-slate-900 truncate">
-                                {item.name}
-                              </p>
-                              <p className="text-[11px] font-mono text-slate-500">
-                                {item.qrCode} · Tersedia: {item.availableStock} unit
-                              </p>
-                            </div>
-                          </div>
-
-                          {isChecked && cartEntry && (
-                            <div
-                              onClick={(e) => e.stopPropagation()}
-                              className="flex items-center gap-1 shrink-0"
-                            >
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  handleUpdateCartQuantity(
-                                    item.id,
-                                    cartEntry.quantity - 1
-                                  )
-                                }
-                                className="p-1 rounded border border-slate-200 bg-white hover:bg-slate-100"
-                              >
-                                <Minus className="w-3 h-3" />
-                              </button>
-                              <input
-                                type="number"
-                                min={1}
-                                max={item.availableStock}
-                                value={cartEntry.quantity}
-                                onChange={(e) =>
-                                  handleUpdateCartQuantity(
-                                    item.id,
-                                    Number.parseInt(e.target.value, 10) || 1
-                                  )
-                                }
-                                className="w-11 py-0.5 text-center text-xs font-mono border border-slate-200 rounded bg-white"
-                              />
-                              <button
-                                type="button"
-                                disabled={
-                                  cartEntry.quantity >= item.availableStock
-                                }
-                                onClick={() =>
-                                  handleUpdateCartQuantity(
-                                    item.id,
-                                    cartEntry.quantity + 1
-                                  )
-                                }
-                                className="p-1 rounded border border-slate-200 bg-white hover:bg-slate-100 disabled:opacity-40"
-                              >
-                                <Plus className="w-3 h-3" />
-                              </button>
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })
+                  {matchedItem && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        handleAddToBorrowCart(matchedItem, 1);
+                        setScannedQrCode('');
+                      }}
+                      className="inline-flex items-center gap-1 px-3.5 py-2 text-xs font-semibold text-white bg-[#e71f69] hover:bg-[#cf165b] rounded-lg shrink-0"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                      Tambah
+                    </button>
                   )}
                 </div>
+
+                {cameraTarget === 'borrow' && (
+                  <div className="p-3 bg-slate-900 rounded-lg text-center space-y-2 relative overflow-hidden">
+                    <div className="relative rounded overflow-hidden border border-slate-700 bg-black">
+                      <video
+                        ref={videoRef}
+                        autoPlay
+                        playsInline
+                        muted
+                        className="w-full h-56 object-cover"
+                      />
+                      <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+                        <div className="w-44 h-44 border-2 border-[#e71f69] rounded-lg shadow-[0_0_0_9999px_rgba(0,0,0,0.35)]" />
+                      </div>
+                    </div>
+                    <p className="text-xs text-slate-200">
+                      Arahkan kamera ke Kode QR pada barang...
+                    </p>
+                  </div>
+                )}
+
+                {scanSuccessMsg && (
+                  <div className="p-2.5 bg-emerald-50 border border-emerald-200 rounded-lg text-xs font-medium text-emerald-700 flex items-center gap-2">
+                    <CheckCircle2 className="w-4 h-4 shrink-0" />
+                    <span>{scanSuccessMsg}</span>
+                  </div>
+                )}
+
+                {cameraStatusMsg && (
+                  <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-2.5">
+                    {cameraStatusMsg}
+                  </p>
+                )}
+
+                {scannedQrCode.trim() !== '' && matchedItem && (
+                  <div className="p-3 bg-white border border-slate-200 rounded-lg flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-3">
+                      {matchedItem.imageUrl ? (
+                        <img
+                          src={normalizeGoogleDriveImageUrl(matchedItem.imageUrl)}
+                          alt={matchedItem.name}
+                          referrerPolicy="no-referrer"
+                          onError={(e) =>
+                            handleDriveImageError(
+                              e,
+                              matchedItem.imageUrl,
+                              matchedItem.name
+                            )
+                          }
+                          className="w-12 h-12 rounded-lg object-cover border border-slate-200 shrink-0 bg-slate-100"
+                        />
+                      ) : (
+                        <QrCodeSvg value={matchedItem.qrCode} size={48} />
+                      )}
+                      <div className="text-xs">
+                        <span className="font-mono font-semibold text-[#e71f69]">
+                          TERDETEKSI · {matchedItem.qrCode}
+                        </span>
+                        <p className="font-semibold text-slate-900">
+                          {matchedItem.name}
+                        </p>
+                        <p className="text-[11px] text-slate-500">
+                          Tersedia: {matchedItem.availableStock} unit
+                        </p>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        handleAddToBorrowCart(matchedItem, 1);
+                        setScannedQrCode('');
+                      }}
+                      className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-semibold text-white bg-[#e71f69] hover:bg-[#cf165b] rounded-lg shrink-0"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                      Masukkan
+                    </button>
+                  </div>
+                )}
               </div>
 
-              {/* Selected Items Summary Cart */}
-              <div className="space-y-2 pt-2 border-t border-slate-200">
+              {/* Step 2: Scanned Items List + Quantity Adjustment */}
+              <div className="space-y-2.5">
                 <div className="flex items-center justify-between">
-                  <span className="text-xs font-semibold text-slate-800">
-                    Ringkasan Daftar Barang Dipinjam ({resolvedCartEntries.length} Jenis · {totalUnitsInCart} Unit)
+                  <span className="text-xs font-semibold text-slate-900">
+                    2. Barang Hasil Scan QR & Atur Jumlah Unit ({resolvedCartEntries.length} Jenis · {totalUnitsInCart} Unit)
                   </span>
                   {resolvedCartEntries.length > 0 && (
                     <button
@@ -1415,51 +1310,114 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
                       onClick={() => setBorrowCart([])}
                       className="text-[11px] font-medium text-red-600 hover:underline"
                     >
-                      Kosongkan Semua
+                      Kosongkan
                     </button>
                   )}
                 </div>
 
                 {resolvedCartEntries.length === 0 ? (
-                  <div className="p-3.5 bg-slate-50 border border-dashed border-slate-300 rounded-lg text-xs text-slate-600">
-                    Belum ada barang yang dicentang. Silakan centang satu atau banyak barang sekaligus pada tabel di atas.
+                  <div className="p-6 bg-slate-50 border border-dashed border-slate-300 rounded-xl text-center space-y-2">
+                    <ScanLine className="w-7 h-7 text-slate-400 mx-auto" />
+                    <p className="text-xs font-semibold text-slate-700">
+                      Belum Ada Barang yang Di-Scan
+                    </p>
+                    <p className="text-xs text-slate-500">
+                      Silakan klik <strong>Buka Kamera Scan QR</strong> di atas untuk memindai QR barang yang ingin dipinjam. Anda dapat memindai lebih dari 1 barang.
+                    </p>
                   </div>
                 ) : (
-                  <div className="divide-y divide-slate-200 border border-slate-200 rounded-lg overflow-hidden bg-white max-h-52 overflow-y-auto">
-                    {resolvedCartEntries.map(({ item, quantity: itemQty }) => (
-                      <div
-                        key={item.id}
-                        className="p-2.5 flex items-center justify-between gap-2 text-xs"
-                      >
-                        <div className="min-w-0 flex-1">
-                          <span className="font-semibold text-slate-900">
-                            {item.name}
-                          </span>{' '}
-                          <span className="font-mono text-slate-500">
-                            ({item.qrCode})
-                          </span>
+                  <div className="divide-y divide-slate-200 border border-slate-200 rounded-xl overflow-hidden bg-white">
+                    {resolvedCartEntries.map(({ item, quantity: itemQty }) => {
+                      const normalizedImg = item.imageUrl
+                        ? normalizeGoogleDriveImageUrl(item.imageUrl)
+                        : '';
+                      return (
+                        <div
+                          key={item.id}
+                          className="p-3.5 flex items-center justify-between gap-3 text-xs"
+                        >
+                          <div className="flex items-center gap-3 min-w-0 flex-1">
+                            {normalizedImg ? (
+                              <img
+                                src={normalizedImg}
+                                alt={item.name}
+                                referrerPolicy="no-referrer"
+                                onError={(e) =>
+                                  handleDriveImageError(
+                                    e,
+                                    item.imageUrl,
+                                    item.name
+                                  )
+                                }
+                                className="w-11 h-11 rounded-lg object-cover border border-slate-200 shrink-0 bg-slate-100"
+                              />
+                            ) : (
+                              <QrCodeSvg value={item.qrCode} size={40} />
+                            )}
+                            <div className="min-w-0 flex-1">
+                              <p className="font-semibold text-slate-900 truncate">
+                                {item.name}
+                              </p>
+                              <p className="font-mono text-[11px] text-slate-500 mt-0.5">
+                                {item.qrCode} · Maks: {item.availableStock} unit
+                              </p>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                handleUpdateCartQuantity(item.id, itemQty - 1)
+                              }
+                              aria-label={`Kurangi jumlah ${item.name}`}
+                              className="p-1.5 rounded-md border border-slate-200 bg-slate-50 hover:bg-slate-100"
+                            >
+                              <Minus className="w-3.5 h-3.5" />
+                            </button>
+                            <input
+                              type="number"
+                              min={1}
+                              max={item.availableStock}
+                              value={itemQty}
+                              onChange={(e) =>
+                                handleUpdateCartQuantity(
+                                  item.id,
+                                  Number.parseInt(e.target.value, 10) || 1
+                                )
+                              }
+                              aria-label={`Jumlah unit ${item.name}`}
+                              className="w-14 py-1 text-center text-xs font-mono font-semibold border border-slate-200 rounded-md bg-white"
+                            />
+                            <button
+                              type="button"
+                              disabled={itemQty >= item.availableStock}
+                              onClick={() =>
+                                handleUpdateCartQuantity(item.id, itemQty + 1)
+                              }
+                              aria-label={`Tambah jumlah ${item.name}`}
+                              className="p-1.5 rounded-md border border-slate-200 bg-slate-50 hover:bg-slate-100 disabled:opacity-40"
+                            >
+                              <Plus className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveFromCart(item.id)}
+                              aria-label={`Hapus ${item.name} dari daftar`}
+                              className="p-1.5 text-red-600 hover:bg-red-50 rounded-md ml-1"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
                         </div>
-                        <div className="flex items-center gap-2 shrink-0">
-                          <span className="font-mono font-semibold text-[#0d113a]">
-                            {itemQty} unit
-                          </span>
-                          <button
-                            type="button"
-                            onClick={() => handleRemoveFromCart(item.id)}
-                            aria-label={`Hapus ${item.name} dari daftar`}
-                            className="p-1 text-red-600 hover:bg-red-50 rounded"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 )}
               </div>
             </div>
 
-            {/* Right Column: Duration, Notes, and Photo Proof */}
+            {/* Right Column: Duration, Notes, Real Camera / Photo Upload, and Confirm Loan */}
             <div className="lg:col-span-6 space-y-5">
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
@@ -1476,7 +1434,9 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
                     max={30}
                     value={durationDays}
                     onChange={(e) =>
-                      handleDurationChange(Number.parseInt(e.target.value, 10) || 1)
+                      handleDurationChange(
+                        Number.parseInt(e.target.value, 10) || 1
+                      )
                     }
                     className="w-full px-3 py-2 text-xs font-mono bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-[#0d113a]"
                   />
@@ -1516,41 +1476,135 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
                 />
               </div>
 
-              {/* Photo Proof Attachment */}
-              <div className="space-y-2">
-                <span className="block text-xs font-medium text-slate-700">
-                  Bukti Foto Kondisi Barang Saat Dipinjam *
-                </span>
-                <div className="flex flex-wrap items-center gap-2.5">
-                  <button
-                    type="button"
-                    onClick={handleCaptureInstantBorrowPhoto}
-                    className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-[#e71f69] bg-[#e71f69]/10 hover:bg-[#e71f69]/20 border border-[#e71f69]/30 rounded-lg transition-colors"
-                  >
-                    <Camera className="w-3.5 h-3.5" />
-                    Ambil Foto Bukti Serah Terima (Kamera Instan)
-                  </button>
-
-                  <label className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg cursor-pointer transition-colors">
-                    <Upload className="w-3.5 h-3.5" />
-                    Unggah File Foto
-                    <input
-                      type="file"
-                      accept="image/*"
-                      onChange={handleBorrowPhotoFile}
-                      className="sr-only"
-                    />
-                  </label>
+              {/* Real Camera & File Upload for Borrow Photo Proof */}
+              <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="block text-xs font-semibold text-slate-800">
+                    3. Bukti Foto Pengambilan Barang *
+                  </span>
+                  {borrowPhotoDataUrl && (
+                    <button
+                      type="button"
+                      onClick={() => setBorrowPhotoDataUrl('')}
+                      className="inline-flex items-center gap-1 text-xs font-medium text-red-600 hover:text-red-700"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                      Hapus / Ulangi Foto
+                    </button>
+                  )}
                 </div>
 
+                {/* Hidden File Inputs for Native Camera & Gallery Upload */}
+                <input
+                  ref={borrowNativeCameraInputRef}
+                  type="file"
+                  accept="image/*"
+                  capture="environment"
+                  onChange={handleBorrowPhotoFile}
+                  className="hidden"
+                />
+                <input
+                  ref={borrowFileInputRef}
+                  type="file"
+                  accept="image/*"
+                  onChange={handleBorrowPhotoFile}
+                  className="hidden"
+                />
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      photoCameraTarget === 'borrow'
+                        ? handleStopPhotoCamera()
+                        : handleStartPhotoCamera('borrow', 'environment')
+                    }
+                    className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-white bg-[#e71f69] hover:bg-[#cf165b] rounded-lg transition-colors shadow-xs"
+                  >
+                    <Camera className="w-3.5 h-3.5" />
+                    {photoCameraTarget === 'borrow'
+                      ? 'Tutup Kamera'
+                      : 'Buka Kamera Ambil Foto'}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => borrowFileInputRef.current?.click()}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-slate-800 bg-white hover:bg-slate-100 border border-slate-300 rounded-lg transition-colors"
+                  >
+                    <Upload className="w-3.5 h-3.5 text-[#0d113a]" />
+                    Unggah File Foto
+                  </button>
+                </div>
+
+                {photoCameraError && photoCameraTarget === null && (
+                  <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-2">
+                    {photoCameraError}
+                  </p>
+                )}
+
+                {/* Live WebRTC Photo Stream */}
+                {photoCameraTarget === 'borrow' && (
+                  <div className="p-3 bg-slate-900 rounded-xl space-y-3">
+                    <div className="relative rounded-lg overflow-hidden border border-slate-700 bg-black aspect-video flex items-center justify-center">
+                      <video
+                        ref={photoVideoRef}
+                        autoPlay
+                        playsInline
+                        muted
+                        className="w-full h-full object-cover"
+                      />
+                    </div>
+                    <div className="flex flex-wrap items-center justify-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => handleSnapPhotoFromLiveCamera('borrow')}
+                        className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg shadow-xs"
+                      >
+                        <Camera className="w-4 h-4" />
+                        Jepret Foto Bukti
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          handleStartPhotoCamera(
+                            'borrow',
+                            photoCameraFacing === 'environment'
+                              ? 'user'
+                              : 'environment'
+                          )
+                        }
+                        className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-slate-200 bg-slate-800 hover:bg-slate-700 rounded-lg"
+                      >
+                        <RefreshCw className="w-3.5 h-3.5" />
+                        Putar Kamera
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleStopPhotoCamera}
+                        className="inline-flex items-center gap-1 px-3 py-2 text-xs font-medium text-slate-300 hover:text-white"
+                      >
+                        Batal
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Captured or Uploaded Photo Preview */}
                 {borrowPhotoDataUrl && (
-                  <div className="mt-2 border border-slate-200 rounded-lg overflow-hidden max-w-sm bg-slate-900">
-                    <img
-                      src={borrowPhotoDataUrl}
-                      alt="Pratinjau bukti foto peminjaman"
-                      referrerPolicy="no-referrer"
-                      className="w-full h-40 object-cover"
-                    />
+                  <div className="space-y-1.5">
+                    <div className="border border-slate-200 rounded-lg overflow-hidden max-w-md bg-slate-900 aspect-video flex items-center justify-center">
+                      <img
+                        src={borrowPhotoDataUrl}
+                        alt="Pratinjau bukti foto peminjaman"
+                        referrerPolicy="no-referrer"
+                        className="w-full h-full object-contain"
+                      />
+                    </div>
+                    <p className="text-[11px] font-medium text-emerald-700 flex items-center gap-1">
+                      <CheckCircle2 className="w-3.5 h-3.5" />
+                      Foto bukti pengambilan barang berhasil dilampirkan.
+                    </p>
                   </div>
                 )}
               </div>
@@ -1568,13 +1622,13 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
                 </div>
               )}
 
-              <div className="pt-2">
+              <div className="pt-1">
                 <button
                   type="submit"
-                  className="inline-flex items-center gap-2 px-5 py-2.5 text-xs font-semibold text-white bg-[#0d113a] hover:bg-[#151c54] rounded-lg transition-colors shadow-xs"
+                  className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-6 py-3 text-xs font-semibold text-white bg-[#0d113a] hover:bg-[#151c54] rounded-lg transition-colors shadow-xs"
                 >
-                  <Package className="w-4 h-4" />
-                  Konfirmasi Peminjaman Sekaligus
+                  <Package className="w-4 h-4 text-[#e71f69]" />
+                  Konfirmasi Pinjaman
                   {resolvedCartEntries.length > 0
                     ? ` (${resolvedCartEntries.length} Barang · ${totalUnitsInCart} Unit)`
                     : ''}
@@ -1585,7 +1639,7 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
         </section>
       )}
 
-      {/* TAB 3: RETURN ITEM (SUPPORTS MULTI-RETURN & CANCEL/DELETE LOAN) */}
+      {/* TAB 3: RETURN ITEM (SUPPORTS MULTI-RETURN, LIVE CAMERA PHOTO & UPLOAD) */}
       {activeTab === 'return' && (
         <section
           aria-label="Formulir Pengembalian Barang"
@@ -1597,7 +1651,7 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
                 Pengembalian atau Pembatalan Barang Pinjaman
               </h2>
               <p className="text-xs text-slate-500 mt-0.5">
-                Centang satu atau beberapa barang untuk dikembalikan sekaligus, atau klik Batal Pinjam jika ingin menghapus pinjaman
+                Centang atau Scan QR barang yang dikembalikan, ambil/unggah foto bukti pengembalian, lalu selesaikan pengembalian
               </p>
             </div>
           </div>
@@ -1624,7 +1678,7 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
               <div className="lg:col-span-5 space-y-4">
                 <div className="flex items-center justify-between">
                   <span className="text-xs font-semibold text-slate-800">
-                    1. Centang Barang yang Dikembalikan ({activeReturnLoansList.length} Dipilih)
+                    1. Pilih Barang yang Dikembalikan ({activeReturnLoansList.length} Dipilih)
                   </span>
                   <button
                     type="button"
@@ -1702,7 +1756,7 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
                     htmlFor="return-qr-verify"
                     className="block text-xs font-medium text-slate-700 mb-1"
                   >
-                    Atau Scan Kode QR Barang
+                    Atau Scan Kode QR Barang yang Dikembalikan
                   </label>
                   <div className="flex flex-wrap gap-2">
                     <input
@@ -1778,40 +1832,129 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
                   />
                 </div>
 
-                <div className="space-y-2">
-                  <span className="block text-xs font-medium text-slate-700">
-                    Bukti Foto Barang Saat Dikembalikan *
-                  </span>
-                  <div className="flex flex-wrap items-center gap-2.5">
-                    <button
-                      type="button"
-                      onClick={handleCaptureInstantReturnPhoto}
-                      className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-lg transition-colors"
-                    >
-                      <Camera className="w-3.5 h-3.5" />
-                      Ambil Foto Bukti Pengembalian (Kamera Instan)
-                    </button>
-
-                    <label className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg cursor-pointer transition-colors">
-                      <Upload className="w-3.5 h-3.5" />
-                      Unggah File Foto Pengembalian
-                      <input
-                        type="file"
-                        accept="image/*"
-                        onChange={handleReturnPhotoFile}
-                        className="sr-only"
-                      />
-                    </label>
+                {/* Real Camera & File Upload for Return Photo Proof */}
+                <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="block text-xs font-semibold text-slate-800">
+                      Bukti Foto Barang Saat Dikembalikan *
+                    </span>
+                    {returnPhotoDataUrl && (
+                      <button
+                        type="button"
+                        onClick={() => setReturnPhotoDataUrl('')}
+                        className="inline-flex items-center gap-1 text-xs font-medium text-red-600 hover:text-red-700"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                        Hapus / Ulangi Foto
+                      </button>
+                    )}
                   </div>
 
+                  {/* Hidden File Inputs for Native Camera & Gallery Upload */}
+                  <input
+                    ref={returnNativeCameraInputRef}
+                    type="file"
+                    accept="image/*"
+                    capture="environment"
+                    onChange={handleReturnPhotoFile}
+                    className="hidden"
+                  />
+                  <input
+                    ref={returnFileInputRef}
+                    type="file"
+                    accept="image/*"
+                    onChange={handleReturnPhotoFile}
+                    className="hidden"
+                  />
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        photoCameraTarget === 'return'
+                          ? handleStopPhotoCamera()
+                          : handleStartPhotoCamera('return', 'environment')
+                      }
+                      className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg transition-colors shadow-xs"
+                    >
+                      <Camera className="w-3.5 h-3.5" />
+                      {photoCameraTarget === 'return'
+                        ? 'Tutup Kamera'
+                        : 'Buka Kamera Ambil Foto'}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => returnFileInputRef.current?.click()}
+                      className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-slate-800 bg-white hover:bg-slate-100 border border-slate-300 rounded-lg transition-colors"
+                    >
+                      <Upload className="w-3.5 h-3.5 text-[#0d113a]" />
+                      Unggah File Foto Pengembalian
+                    </button>
+                  </div>
+
+                  {/* Live WebRTC Photo Stream for Return */}
+                  {photoCameraTarget === 'return' && (
+                    <div className="p-3 bg-slate-900 rounded-xl space-y-3">
+                      <div className="relative rounded-lg overflow-hidden border border-slate-700 bg-black aspect-video flex items-center justify-center">
+                        <video
+                          ref={photoVideoRef}
+                          autoPlay
+                          playsInline
+                          muted
+                          className="w-full h-full object-cover"
+                        />
+                      </div>
+                      <div className="flex flex-wrap items-center justify-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => handleSnapPhotoFromLiveCamera('return')}
+                          className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg shadow-xs"
+                        >
+                          <Camera className="w-4 h-4" />
+                          Jepret Foto Bukti
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            handleStartPhotoCamera(
+                              'return',
+                              photoCameraFacing === 'environment'
+                                ? 'user'
+                                : 'environment'
+                            )
+                          }
+                          className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-slate-200 bg-slate-800 hover:bg-slate-700 rounded-lg"
+                        >
+                          <RefreshCw className="w-3.5 h-3.5" />
+                          Putar Kamera
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleStopPhotoCamera}
+                          className="inline-flex items-center gap-1 px-3 py-2 text-xs font-medium text-slate-300 hover:text-white"
+                        >
+                          Batal
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Captured or Uploaded Return Photo Preview */}
                   {returnPhotoDataUrl && (
-                    <div className="mt-2 border border-slate-200 rounded-lg overflow-hidden max-w-sm bg-slate-900">
-                      <img
-                        src={returnPhotoDataUrl}
-                        alt="Pratinjau bukti foto pengembalian"
-                        referrerPolicy="no-referrer"
-                        className="w-full h-40 object-cover"
-                      />
+                    <div className="space-y-1.5">
+                      <div className="border border-slate-200 rounded-lg overflow-hidden max-w-md bg-slate-900 aspect-video flex items-center justify-center">
+                        <img
+                          src={returnPhotoDataUrl}
+                          alt="Pratinjau bukti foto pengembalian"
+                          referrerPolicy="no-referrer"
+                          className="w-full h-full object-contain"
+                        />
+                      </div>
+                      <p className="text-[11px] font-medium text-emerald-700 flex items-center gap-1">
+                        <CheckCircle2 className="w-3.5 h-3.5" />
+                        Foto bukti pengembalian barang berhasil dilampirkan.
+                      </p>
                     </div>
                   )}
                 </div>

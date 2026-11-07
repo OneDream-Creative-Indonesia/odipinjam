@@ -19,6 +19,7 @@ import {
   authenticateUser,
   buildAutomatedEmailNotifications,
   calculateDueState,
+  sanitizeInventoryItem,
 } from './utils/inventoryLogic';
 import { AdminDashboardView } from './components/AdminDashboardView';
 import { AdminInventoryView } from './components/AdminInventoryView';
@@ -93,7 +94,14 @@ export default function App() {
   const [items, setItems] = useState<InventoryItem[]>(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEYS.ITEMS);
-      if (saved) return JSON.parse(saved);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) {
+          return parsed.map((it: InventoryItem, idx: number) =>
+            sanitizeInventoryItem(it, idx)
+          );
+        }
+      }
     } catch {
       // ignore storage errors
     }
@@ -142,7 +150,7 @@ export default function App() {
   >('dashboard');
   const [memberTab, setMemberTab] = useState<
     'catalog' | 'borrow' | 'return' | 'notifications'
-  >('catalog');
+  >('borrow');
 
   // QR Inspection Modal state
   const [inspectedQrItem, setInspectedQrItem] =
@@ -187,7 +195,9 @@ export default function App() {
       const data = await res.json();
       const serverUsers: User[] = Array.isArray(data.users) ? data.users : [];
       const serverItems: InventoryItem[] = Array.isArray(data.items)
-        ? data.items
+        ? data.items.map((it: InventoryItem, idx: number) =>
+            sanitizeInventoryItem(it, idx)
+          )
         : [];
       const serverLoans: LoanRecord[] = Array.isArray(data.loans)
         ? data.loans
@@ -326,7 +336,7 @@ export default function App() {
     if (result.user.role === 'admin') {
       setAdminTab('dashboard');
     } else {
-      setMemberTab('catalog');
+      setMemberTab('borrow');
     }
   };
 

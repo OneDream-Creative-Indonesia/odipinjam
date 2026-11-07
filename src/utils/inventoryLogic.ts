@@ -331,6 +331,44 @@ export function calculateDueState(
 // ============================================================================
 
 /**
+ * Extracts the Google Drive file ID from any Google Drive sharing, preview, open, uc,
+ * thumbnail, or googleusercontent URL.
+ */
+export function extractGoogleDriveFileId(url: string): string | null {
+  const clean = (url || '')
+    .trim()
+    .replace(/^["']+|["']+$/g, '')
+    .trim();
+  if (!clean) return null;
+
+  // Extract first http(s) URL if wrapped in formula or text like =IMAGE("https://...")
+  const urlInTextMatch = /https?:\/\/[^\s"'<>)]+/i.exec(clean);
+  const target = urlInTextMatch ? urlInTextMatch[0] : clean;
+
+  if (
+    !target.includes('drive.google.com') &&
+    !target.includes('docs.google.com') &&
+    !target.includes('googleusercontent.com')
+  ) {
+    return null;
+  }
+
+  // 1. Match /file/d/FILE_ID or /d/FILE_ID
+  const fileDMatch = /\/(?:file\/)?d\/([a-zA-Z0-9_-]{10,})/i.exec(target);
+  if (fileDMatch && fileDMatch[1]) {
+    return fileDMatch[1];
+  }
+
+  // 2. Match id=FILE_ID parameter
+  const idParamMatch = /[?&]id=([a-zA-Z0-9_-]{10,})/i.exec(target);
+  if (idParamMatch && idParamMatch[1]) {
+    return idParamMatch[1];
+  }
+
+  return null;
+}
+
+/**
  * Detects Google Drive sharing or preview URLs and automatically converts them
  * to direct thumbnail/image streaming URLs (high-resolution) so they render
  * reliably in <img> elements without broken images.
@@ -342,27 +380,152 @@ export function calculateDueState(
  * - https://drive.google.com/open?id=FILE_ID
  * - https://drive.google.com/uc?id=FILE_ID
  * - https://drive.google.com/uc?export=view&id=FILE_ID
+ * - =IMAGE("https://drive.google.com/...") or =HYPERLINK("https://drive.google.com/...", "...")
  */
 export function normalizeGoogleDriveImageUrl(url: string): string {
-  const clean = (url || '').trim();
+  const clean = (url || '')
+    .trim()
+    .replace(/^["']+|["']+$/g, '')
+    .trim();
   if (!clean) return '';
-  if (!clean.includes('drive.google.com') && !clean.includes('docs.google.com')) {
-    return clean;
+
+  const fileId = extractGoogleDriveFileId(clean);
+  if (fileId) {
+    return `https://drive.google.com/thumbnail?id=${fileId}&sz=w1000`;
   }
 
-  // 1. Match /file/d/FILE_ID
-  const fileDMatch = /\/file\/d\/([a-zA-Z0-9_-]+)/i.exec(clean);
-  if (fileDMatch && fileDMatch[1]) {
-    return `https://drive.google.com/thumbnail?id=${fileDMatch[1]}&sz=w1000`;
-  }
-
-  // 2. Match id=FILE_ID parameter
-  const idParamMatch = /[?&]id=([a-zA-Z0-9_-]+)/i.exec(clean);
-  if (idParamMatch && idParamMatch[1]) {
-    return `https://drive.google.com/thumbnail?id=${idParamMatch[1]}&sz=w1000`;
+  const urlInTextMatch = /https?:\/\/[^\s"'<>)]+/i.exec(clean);
+  if (urlInTextMatch && clean.startsWith('=')) {
+    return urlInTextMatch[0];
   }
 
   return clean;
+}
+
+/**
+ * Returns an ordered list of fallback image URLs for a Google Drive image so
+ * if one endpoint is blocked by browser cookie/ORB policies, the <img> element
+ * can automatically switch to the next fallback (including our local server proxy).
+ */
+export function getGoogleDriveFallbackUrls(url: string): string[] {
+  const fileId = extractGoogleDriveFileId(url);
+  if (!fileId) return url ? [url] : [];
+  return [
+    `https://drive.google.com/thumbnail?id=${fileId}&sz=w1000`,
+    `https://lh3.googleusercontent.com/d/${fileId}=w1000`,
+    `/api/drive-image/${fileId}`,
+    `https://drive.google.com/uc?export=view&id=${fileId}`,
+  ];
+}
+
+/**
+ * Shared onError handler for <img> elements displaying inventory photos.
+ * Automatically cycles through Google Drive fallback endpoints and server proxy
+ * before falling back to a clean SVG placeholder.
+ */
+export function handleDriveImageError(
+  event: { currentTarget: HTMLImageElement },
+  originalUrl?: string,
+  itemName?: string
+): void {
+  const img = event.currentTarget;
+  const rawUrl = originalUrl || img.src || '';
+  const fallbacks = getGoogleDriveFallbackUrls(rawUrl);
+  const stepAttr = Number.parseInt(img.getAttribute('data-drive-fallback-step') || '0', 10);
+
+  if (fallbacks.length > 1 && stepAttr < fallbacks.length) {
+    const nextUrl = fallbacks[stepAttr];
+    img.setAttribute('data-drive-fallback-step', String(stepAttr + 1));
+    if (img.src !== nextUrl) {
+      img.src = nextUrl;
+      return;
+    }
+    if (stepAttr + 1 < fallbacks.length) {
+      img.setAttribute('data-drive-fallback-step', String(stepAttr + 2));
+      img.src = fallbacks[stepAttr + 1];
+      return;
+    }
+  }
+
+  // Final SVG placeholder so broken image icon never appears
+  if (!img.getAttribute('data-fallback-final')) {
+    img.setAttribute('data-fallback-final', '1');
+    const safeLabel = (itemName || 'Foto Barang')
+      .replace(/[<>&"']/g, '')
+      .slice(0, 28);
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="400" height="300" viewBox="0 0 400 300">
+      <rect width="400" height="300" fill="#f1f5f9"/>
+      <rect x="24" y="24" width="352" height="252" rx="16" fill="#e2e8f0" stroke="#cbd5e1" stroke-width="2"/>
+      <text x="200" y="142" text-anchor="middle" font-family="Arial, sans-serif" font-size="15" font-weight="bold" fill="#475569">${safeLabel}</text>
+      <text x="200" y="168" text-anchor="middle" font-family="Arial, sans-serif" font-size="11" fill="#64748b">Pastikan akses file Google Drive: Siapa saja yang memiliki link</text>
+    </svg>`;
+    img.src = `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
+  }
+}
+
+/**
+ * Repairs any existing InventoryItem whose fields were shifted by older Excel imports
+ * (e.g., description or Google Drive URL accidentally stored inside qrCode or description).
+ */
+export function sanitizeInventoryItem(
+  item: InventoryItem,
+  index = 0
+): InventoryItem {
+  let { qrCode, description, imageUrl } = item;
+  const name = item.name || 'Barang Inventaris';
+  const category = item.category || 'Umum';
+
+  // Check if description or qrCode contains a Google Drive link when imageUrl is missing
+  if (!imageUrl) {
+    if (description && (description.includes('drive.google.com') || /^https?:\/\//i.test(description.trim()))) {
+      const urlMatch = /https?:\/\/[^\s"'<>)]+/i.exec(description);
+      if (urlMatch) {
+        imageUrl = normalizeGoogleDriveImageUrl(urlMatch[0]);
+        description = description.replace(urlMatch[0], '').trim();
+      }
+    }
+    if (!imageUrl && qrCode && (qrCode.includes('drive.google.com') || /^https?:\/\//i.test(qrCode.trim()))) {
+      const urlMatch = /https?:\/\/[^\s"'<>)]+/i.exec(qrCode);
+      if (urlMatch) {
+        imageUrl = normalizeGoogleDriveImageUrl(urlMatch[0]);
+        qrCode = '';
+      }
+    }
+  } else {
+    imageUrl = normalizeGoogleDriveImageUrl(imageUrl);
+  }
+
+  // Check if qrCode accidentally holds a long description or sentence (from empty F2 cell shift)
+  const cleanQr = (qrCode || '').trim();
+  const looksLikeSentenceOrCorruptQr =
+    !cleanQr ||
+    cleanQr.length > 28 ||
+    (cleanQr.includes(' ') && cleanQr.length > 15) ||
+    /^https?:\/\//i.test(cleanQr);
+
+  if (looksLikeSentenceOrCorruptQr) {
+    if (
+      cleanQr &&
+      !cleanQr.startsWith('http') &&
+      (!description ||
+        description.startsWith('Barang inventaris kategori') ||
+        description === cleanQr)
+    ) {
+      description = cleanQr;
+    }
+    qrCode = generateQrCodeString(name, category, index + 1);
+  }
+
+  if (!description || !description.trim()) {
+    description = `Barang inventaris kategori ${category}`;
+  }
+
+  return {
+    ...item,
+    qrCode,
+    description,
+    ...(imageUrl ? { imageUrl } : {}),
+  };
 }
 
 /**
@@ -406,13 +569,35 @@ export function validateBulkInventoryRows(
     const location =
       String(row.location || 'Gudang Utama').trim() || 'Gudang Utama';
     const conditionRaw = String(row.condition || 'Baik').trim();
-    const customQr = String(row.customQr || '').trim().toUpperCase();
+    let rawCustomQr = String(row.customQr || '').trim();
+    let rawDescription = String(row.description || '').trim();
+    let rawImageUrl = String(row.imageUrl || '').trim();
+
+    // Auto-detect if user put Google Drive link in customQr or description column
+    if (!rawImageUrl && (/^https?:\/\//i.test(rawDescription) || rawDescription.includes('drive.google.com'))) {
+      rawImageUrl = rawDescription;
+      rawDescription = '';
+    }
+    if (!rawImageUrl && (/^https?:\/\//i.test(rawCustomQr) || rawCustomQr.includes('drive.google.com'))) {
+      rawImageUrl = rawCustomQr;
+      rawCustomQr = '';
+    }
+
+    // Auto-detect if customQr accidentally contains a long description text instead of a short code
+    if (
+      rawCustomQr &&
+      (rawCustomQr.length > 28 || (rawCustomQr.includes(' ') && rawCustomQr.length > 15))
+    ) {
+      if (!rawDescription) {
+        rawDescription = rawCustomQr;
+      }
+      rawCustomQr = '';
+    }
+
+    const customQr = rawCustomQr.toUpperCase();
     const description =
-      String(row.description || '').trim() ||
-      `Barang inventaris kategori ${category}`;
-    const imageUrl = normalizeGoogleDriveImageUrl(
-      String(row.imageUrl || '').trim()
-    );
+      rawDescription || `Barang inventaris kategori ${category}`;
+    const imageUrl = normalizeGoogleDriveImageUrl(rawImageUrl);
 
     if (!name) {
       errors.push(`Baris ${rowNum}: Nama barang wajib diisi.`);
@@ -1085,47 +1270,98 @@ export async function parseInventoryExcelXlsx(
     }
   }
 
-  // 3. Parse first worksheet
-  const sheetBytes =
-    files.get('xl/worksheets/sheet1.xml') ||
-    Array.from(files.entries()).find(([k]) =>
-      k.startsWith('xl/worksheets/sheet')
-    )?.[1];
+  // 3. Parse first worksheet and its hyperlink relationships (xl/worksheets/_rels/sheet1.xml.rels)
+  const sheetEntry =
+    (files.has('xl/worksheets/sheet1.xml')
+      ? ['xl/worksheets/sheet1.xml', files.get('xl/worksheets/sheet1.xml')!]
+      : Array.from(files.entries()).find(([k]) =>
+          k.startsWith('xl/worksheets/sheet')
+        )) || null;
 
-  if (!sheetBytes) {
+  if (!sheetEntry) {
     throw new Error('Lembar kerja (worksheet) tidak ditemukan di dalam file Excel.');
   }
 
+  const [sheetPath, sheetBytes] = sheetEntry as [string, Uint8Array];
+  const sheetFileName = sheetPath.split('/').pop() || 'sheet1.xml';
+  const sheetRelsBytes =
+    files.get(`xl/worksheets/_rels/${sheetFileName}.rels`) ||
+    files.get('xl/worksheets/_rels/sheet1.xml.rels');
+
+  const sheetRelsMap = new Map<string, string>();
+  if (sheetRelsBytes) {
+    const relsXml = decoder.decode(sheetRelsBytes);
+    const relMatches = relsXml.match(/<Relationship\s+[^>]*\/?>/g) || [];
+    for (const rel of relMatches) {
+      const idMatch = /\bId=["']([^"']+)["']/.exec(rel);
+      const targetMatch = /\bTarget=["']([^"']+)["']/.exec(rel);
+      if (idMatch && targetMatch) {
+        sheetRelsMap.set(idMatch[1], unescapeXml(targetMatch[1]));
+      }
+    }
+  }
+
   const sheetXml = decoder.decode(sheetBytes);
-  const rowMatches = sheetXml.match(/<row[\s>][\s\S]*?<\/row>/g) || [];
+
+  // Map cell reference (e.g. "H2") -> hyperlink Target URL
+  const cellHyperlinks = new Map<string, string>();
+  const hyperlinkMatches = sheetXml.match(/<(?:\w+:)?hyperlink\b[^>]*\/?>/g) || [];
+  for (const hl of hyperlinkMatches) {
+    const refMatch = /\bref=["']([A-Za-z]+\d+)["']/i.exec(hl);
+    const rIdMatch = /\br:id=["']([^"']+)["']/i.exec(hl);
+    const locMatch = /\blocation=["']([^"']+)["']/i.exec(hl);
+    if (refMatch) {
+      const cellRef = refMatch[1].toUpperCase();
+      const targetUrl =
+        (rIdMatch ? sheetRelsMap.get(rIdMatch[1]) : '') ||
+        (locMatch ? unescapeXml(locMatch[1]) : '');
+      if (targetUrl) {
+        cellHyperlinks.set(cellRef, targetUrl);
+      }
+    }
+  }
+
+  const rowMatches =
+    sheetXml.match(/<(?:\w+:)?row\b[^>]*>[\s\S]*?<\/(?:\w+:)?row>/g) || [];
   const parsedGrid: { rowNumber1Based: number; cols: string[] }[] = [];
 
   for (let rIdx = 0; rIdx < rowMatches.length; rIdx++) {
     const rowXml = rowMatches[rIdx];
-    const rAttrMatch = /<row[^>]*\sr=["'](\d+)["']/.exec(rowXml);
+    const rAttrMatch = /<(?:\w+:)?row\b[^>]*\br=["'](\d+)["']/.exec(rowXml);
     const rowNumber1Based = rAttrMatch
       ? Number.parseInt(rAttrMatch[1], 10)
       : rIdx + 1;
 
     const cols: string[] = [];
+    // IMPORTANT: Use lazy attribute quantifier `[^>]*?` so self-closing empty cells
+    // like `<c r="F2" s="2"/>` never swallow subsequent cells (`G2`, `H2`).
     const cellMatches =
-      rowXml.match(/<c(?:\s[^>]*)?(?:\/>|>[\s\S]*?<\/c>)/g) || [];
+      rowXml.match(
+        /<(?:[a-zA-Z0-9_]+:)?c\b[^>]*?(?:\/>|>[\s\S]*?<\/(?:[a-zA-Z0-9_]+:)?c>)/g
+      ) || [];
 
     for (let cIdx = 0; cIdx < cellMatches.length; cIdx++) {
       const cellXml = cellMatches[cIdx];
-      const refMatch = /\sr=["']([A-Za-z]+)\d+["']/.exec(cellXml);
-      const colPos = refMatch ? colLetterToIndex(refMatch[1]) : cIdx;
-      const typeMatch = /\st=["']([^"']+)["']/.exec(cellXml);
+      const refMatch = /\br=["'](([A-Za-z]+)\d+)["']/.exec(cellXml);
+      const fullRef = refMatch ? refMatch[1].toUpperCase() : '';
+      const colPos = refMatch ? colLetterToIndex(refMatch[2]) : cIdx;
+      const typeMatch = /\bt=["']([^"']+)["']/.exec(cellXml);
       const cellType = typeMatch ? typeMatch[1] : '';
 
       let val = '';
       if (cellType === 'inlineStr') {
-        const tMatches = cellXml.match(/<t(?:\s[^>]*)?>([\s\S]*?)<\/t>/g) || [];
+        const tMatches =
+          cellXml.match(/<(?:\w+:)?t(?:\s[^>]*)?>([\s\S]*?)<\/(?:\w+:)?t>/g) ||
+          [];
         val = tMatches
-          .map((t) => unescapeXml(t.replace(/<\/?t(?:\s[^>]*)?>/g, '')))
+          .map((t) =>
+            unescapeXml(t.replace(/<\/?(?:\w+:)?t(?:\s[^>]*)?>/g, ''))
+          )
           .join('');
       } else {
-        const vMatch = /<v>([\s\S]*?)<\/v>/.exec(cellXml);
+        const vMatch = /<(?:\w+:)?v(?:\s[^>]*)?>([\s\S]*?)<\/(?:\w+:)?v>/.exec(
+          cellXml
+        );
         if (vMatch) {
           const rawV = unescapeXml(vMatch[1].trim());
           if (cellType === 's') {
@@ -1136,6 +1372,27 @@ export async function parseInventoryExcelXlsx(
           }
         }
       }
+
+      // Check formula <f> for HYPERLINK("https://...") or IMAGE("https://...")
+      const fMatch = /<(?:\w+:)?f(?:\s[^>]*)?>([\s\S]*?)<\/(?:\w+:)?f>/.exec(
+        cellXml
+      );
+      if (fMatch) {
+        const formulaStr = unescapeXml(fMatch[1].trim());
+        const urlInFormula = /https?:\/\/[^\s"'<>)]+/i.exec(formulaStr);
+        if (urlInFormula && (!val || !val.includes('http'))) {
+          val = urlInFormula[0];
+        }
+      }
+
+      // Check if cell has an Excel hyperlink relationship whose target is a URL
+      if (fullRef && cellHyperlinks.has(fullRef)) {
+        const hlUrl = cellHyperlinks.get(fullRef)!;
+        if (!val || !val.includes('http')) {
+          val = hlUrl;
+        }
+      }
+
       cols[colPos] = val.trim();
     }
 
@@ -1160,8 +1417,32 @@ export async function parseInventoryExcelXlsx(
     const { rowNumber1Based, cols } = parsedGrid[i];
     const excelRow0Based = rowNumber1Based - 1;
     const embeddedImg = rowEmbeddedImages.get(excelRow0Based);
+
+    let customQr = (cols[5] || '').trim();
+    let description = (cols[6] || '').trim();
+    let rawImageCol = (cols[7] || '').trim();
+
+    // If col H (cols[7]) is empty, scan other columns from right to left for any Google Drive / image URL
+    if (!rawImageCol) {
+      for (let c = cols.length - 1; c >= 5; c--) {
+        const candidate = (cols[c] || '').trim();
+        if (
+          candidate &&
+          (candidate.includes('drive.google.com') ||
+            candidate.includes('docs.google.com') ||
+            candidate.includes('googleusercontent.com') ||
+            /^https?:\/\//i.test(candidate))
+        ) {
+          rawImageCol = candidate;
+          if (c === 6) description = '';
+          if (c === 5) customQr = '';
+          break;
+        }
+      }
+    }
+
     let imageUrl =
-      normalizeGoogleDriveImageUrl((cols[7] || '').trim()) ||
+      normalizeGoogleDriveImageUrl(rawImageCol) ||
       embeddedImg ||
       '';
 
@@ -1180,8 +1461,8 @@ export async function parseInventoryExcelXlsx(
       totalStock: (cols[2] || '1').trim() || '1',
       location: (cols[3] || 'Gudang Utama').trim() || 'Gudang Utama',
       condition: (cols[4] || 'Baik').trim() || 'Baik',
-      customQr: (cols[5] || '').trim(),
-      description: (cols[6] || '').trim(),
+      customQr,
+      description,
       imageUrl,
     };
 

@@ -4,6 +4,7 @@ import {
   LoanRecord,
 } from '../types/inventory';
 import { calculateDueState } from '../utils/inventoryLogic';
+import { createEquipmentPhotoProofSvg } from '../data/seedData';
 import {
   AlertTriangle,
   Camera,
@@ -1001,10 +1002,38 @@ export const AdminLoansAndEmailsView: React.FC<AdminLoansAndEmailsViewProps> = (
                 </span>
                 <div className="border border-slate-200 rounded-lg overflow-hidden bg-slate-900 aspect-video flex items-center justify-center">
                   <img
-                    src={inspectedLoanPhoto.borrowPhotoDataUrl}
+                    src={
+                      inspectedLoanPhoto.borrowPhotoDataUrl ||
+                      createEquipmentPhotoProofSvg({
+                        title: inspectedLoanPhoto.itemName,
+                        qrCode: inspectedLoanPhoto.itemQrCode,
+                        actorName: inspectedLoanPhoto.userName,
+                        timestampLabel: new Date(
+                          inspectedLoanPhoto.borrowDate
+                        ).toLocaleString('id-ID'),
+                        badgeText: 'BUKTI FOTO PINJAM',
+                        accentHex: '#0284c7',
+                      })
+                    }
                     alt={`Bukti foto peminjaman ${inspectedLoanPhoto.itemName}`}
                     referrerPolicy="no-referrer"
-                    className="w-full h-full object-cover"
+                    onError={(e) => {
+                      const img = e.currentTarget;
+                      if (!img.getAttribute('data-fallback-applied')) {
+                        img.setAttribute('data-fallback-applied', '1');
+                        img.src = createEquipmentPhotoProofSvg({
+                          title: inspectedLoanPhoto.itemName,
+                          qrCode: inspectedLoanPhoto.itemQrCode,
+                          actorName: inspectedLoanPhoto.userName,
+                          timestampLabel: new Date(
+                            inspectedLoanPhoto.borrowDate
+                          ).toLocaleString('id-ID'),
+                          badgeText: 'BUKTI FOTO PINJAM',
+                          accentHex: '#0284c7',
+                        });
+                      }
+                    }}
+                    className="w-full h-full object-contain"
                   />
                 </div>
                 <p className="text-xs text-slate-600">
@@ -1023,7 +1052,25 @@ export const AdminLoansAndEmailsView: React.FC<AdminLoansAndEmailsViewProps> = (
                         src={inspectedLoanPhoto.returnPhotoDataUrl}
                         alt={`Bukti foto pengembalian ${inspectedLoanPhoto.itemName}`}
                         referrerPolicy="no-referrer"
-                        className="w-full h-full object-cover"
+                        onError={(e) => {
+                          const img = e.currentTarget;
+                          if (!img.getAttribute('data-fallback-applied')) {
+                            img.setAttribute('data-fallback-applied', '1');
+                            img.src = createEquipmentPhotoProofSvg({
+                              title: inspectedLoanPhoto.itemName,
+                              qrCode: inspectedLoanPhoto.itemQrCode,
+                              actorName: inspectedLoanPhoto.userName,
+                              timestampLabel: inspectedLoanPhoto.returnDate
+                                ? new Date(
+                                    inspectedLoanPhoto.returnDate
+                                  ).toLocaleString('id-ID')
+                                : new Date().toLocaleString('id-ID'),
+                              badgeText: 'BUKTI FOTO KEMBALI',
+                              accentHex: '#16a34a',
+                            });
+                          }
+                        }}
+                        className="w-full h-full object-contain"
                       />
                     </div>
                     <p className="text-xs text-emerald-700">

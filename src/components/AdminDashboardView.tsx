@@ -8,18 +8,24 @@ import {
 import {
   calculateDueState,
   computeMonthlyLoanReport,
+  handleDriveImageError,
+  normalizeGoogleDriveImageUrl,
 } from '../utils/inventoryLogic';
 import {
   AlertTriangle,
+  ArrowUpDown,
   ArrowUpRight,
   Calendar,
   CheckCircle2,
   Clock,
   Download,
+  ExternalLink,
+  Image as ImageIcon,
   Mail,
   Package,
   QrCode,
   Search,
+  X,
 } from 'lucide-react';
 
 interface AdminDashboardViewProps {
@@ -48,6 +54,10 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
     'all' | 'available' | 'low'
   >('all');
   const [searchQuery, setSearchQuery] = useState('');
+  const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc');
+  const [previewPhotoItem, setPreviewPhotoItem] = useState<InventoryItem | null>(
+    null
+  );
   const [dispatchMessage, setDispatchMessage] = useState<string | null>(null);
 
   const stats = useMemo(() => {
@@ -87,14 +97,15 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
   }, [loans, selectedMonthKey]);
 
   const filteredItems = useMemo(() => {
-    return items.filter((item) => {
+    const matched = items.filter((item) => {
       const q = searchQuery.trim().toLowerCase();
       const matchesQ =
         !q ||
         item.name.toLowerCase().includes(q) ||
         item.qrCode.toLowerCase().includes(q) ||
         item.category.toLowerCase().includes(q) ||
-        item.location.toLowerCase().includes(q);
+        item.location.toLowerCase().includes(q) ||
+        item.description.toLowerCase().includes(q);
 
       if (!matchesQ) return false;
       if (availabilityFilter === 'available') return item.availableStock > 0;
@@ -102,7 +113,12 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
         return item.availableStock === 0 || item.availableStock < item.totalStock;
       return true;
     });
-  }, [items, searchQuery, availabilityFilter]);
+
+    return [...matched].sort((a, b) => {
+      const cmp = a.name.localeCompare(b.name, 'id', { sensitivity: 'base' });
+      return sortOrder === 'asc' ? cmp : -cmp;
+    });
+  }, [items, searchQuery, availabilityFilter, sortOrder]);
 
   const handleTriggerEmails = () => {
     const count = onRunAutoEmailCheck();
@@ -155,6 +171,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
 
   return (
     <div className="space-y-8">
+      {/* Top KPI Grid */}
       <section aria-label="Ringkasan Metrik Real-Time">
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           <div className="bg-white border border-slate-200 rounded-lg p-5">
@@ -236,6 +253,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
         </div>
       </section>
 
+      {/* Automated Email Alert Strip */}
       {(stats.overdueCount > 0 || stats.dueSoonCount > 0) && (
         <section
           aria-label="Status Pengingat Email Otomatis"
@@ -285,6 +303,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
         </section>
       )}
 
+      {/* Real-Time Inventory Tracking Table */}
       <section
         aria-label="Pelacakan Ketersediaan Inventaris Real-Time"
         className="bg-white border border-slate-200 rounded-lg overflow-hidden"
@@ -308,6 +327,18 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                 className="pl-9 pr-3 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-900 placeholder:text-slate-400 focus:outline-none focus:border-[#0d113a] focus:ring-1 focus:ring-[#0d113a] w-56"
               />
             </div>
+
+            <button
+              type="button"
+              onClick={() =>
+                setSortOrder((prev) => (prev === 'asc' ? 'desc' : 'asc'))
+              }
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors whitespace-nowrap shrink-0"
+              title="Urutkan berdasarkan Nama Barang"
+            >
+              <ArrowUpDown className="w-3.5 h-3.5 text-[#0d113a]" />
+              Urutkan Nama ({sortOrder === 'asc' ? 'A–Z' : 'Z–A'})
+            </button>
 
             <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-lg">
               <button
@@ -348,19 +379,32 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
           <table className="w-full text-left border-collapse">
             <thead>
               <tr className="border-b border-slate-200 bg-slate-50/70 text-xs font-medium text-slate-500">
-                <th className="py-3 px-4">Kode QR</th>
-                <th className="py-3 px-4">Nama Barang & Spesifikasi</th>
-                <th className="py-3 px-4">Kategori · Lokasi</th>
+                <th className="py-3 px-4">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setSortOrder((prev) => (prev === 'asc' ? 'desc' : 'asc'))
+                    }
+                    className="inline-flex items-center gap-1 font-medium text-slate-700 hover:text-slate-900"
+                  >
+                    Nama Barang
+                    <ArrowUpDown className="w-3 h-3" />
+                  </button>
+                </th>
+                <th className="py-3 px-4">Kategori</th>
+                <th className="py-3 px-4">Lokasi</th>
                 <th className="py-3 px-4 text-right">Tersedia</th>
-                <th className="py-3 px-4 text-right">Total Unit</th>
+                <th className="py-3 px-4 text-right">Jumlah Unit</th>
                 <th className="py-3 px-4">Status Ketersediaan</th>
-                <th className="py-3 px-4 text-right">Aksi QR</th>
+                <th className="py-3 px-4 text-center">Lihat Foto QR</th>
+                <th className="py-3 px-4 text-center">Lihat Foto</th>
+                <th className="py-3 px-4">Deskripsi</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-200 text-xs">
               {items.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="py-10 text-center text-slate-500">
+                  <td colSpan={9} className="py-10 text-center text-slate-500">
                     <p className="font-medium text-slate-700">
                       Belum ada data barang di dalam inventaris.
                     </p>
@@ -378,7 +422,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                 </tr>
               ) : filteredItems.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="py-8 text-center text-slate-500">
+                  <td colSpan={9} className="py-8 text-center text-slate-500">
                     Tidak ada barang yang cocok dengan pencarian Anda.
                   </td>
                 </tr>
@@ -386,45 +430,48 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                 filteredItems.map((item) => {
                   const borrowedCount = item.totalStock - item.availableStock;
                   const isEmpty = item.availableStock === 0;
+                  const normalizedImg = item.imageUrl
+                    ? normalizeGoogleDriveImageUrl(item.imageUrl)
+                    : '';
                   return (
                     <tr
                       key={item.id}
                       className="hover:bg-slate-50/80 transition-colors"
                     >
-                      <td className="py-3 px-4 font-mono font-medium text-slate-900 tabular-nums whitespace-nowrap">
-                        {item.qrCode}
-                      </td>
                       <td className="py-3 px-4">
                         <div className="flex items-center gap-3">
-                          {item.imageUrl && (
+                          {normalizedImg && (
                             <img
-                              src={item.imageUrl}
+                              src={normalizedImg}
                               alt={item.name}
                               referrerPolicy="no-referrer"
-                              className="w-10 h-10 rounded-lg object-cover border border-slate-200 shrink-0 bg-slate-100"
+                              onError={(e) =>
+                                handleDriveImageError(e, item.imageUrl, item.name)
+                              }
+                              onClick={() => setPreviewPhotoItem(item)}
+                              className="w-10 h-10 rounded-lg object-cover border border-slate-200 shrink-0 bg-slate-100 cursor-pointer hover:opacity-90"
                             />
                           )}
                           <div className="min-w-0">
-                            <p className="font-medium text-slate-900">
+                            <p className="font-semibold text-slate-900">
                               {item.name}
                             </p>
-                            <p className="text-slate-500 line-clamp-1 mt-0.5">
-                              {item.description}
+                            <p className="font-mono text-[11px] text-slate-500 mt-0.5">
+                              {item.qrCode}
                             </p>
                           </div>
                         </div>
                       </td>
+                      <td className="py-3 px-4 text-slate-700 whitespace-nowrap">
+                        {item.category}
+                      </td>
                       <td className="py-3 px-4 text-slate-600 whitespace-nowrap">
-                        <span>{item.category}</span>
-                        <span aria-hidden="true" className="mx-1.5 text-slate-300">
-                          ·
-                        </span>
-                        <span>{item.location}</span>
+                        {item.location}
                       </td>
                       <td className="py-3 px-4 text-right font-mono font-semibold text-slate-900 tabular-nums">
                         {item.availableStock}
                       </td>
-                      <td className="py-3 px-4 text-right font-mono text-slate-500 tabular-nums">
+                      <td className="py-3 px-4 text-right font-mono text-slate-600 tabular-nums">
                         {item.totalStock}
                       </td>
                       <td className="py-3 px-4 whitespace-nowrap">
@@ -445,15 +492,36 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                           </span>
                         )}
                       </td>
-                      <td className="py-3 px-4 text-right whitespace-nowrap">
+                      <td className="py-3 px-4 text-center whitespace-nowrap">
                         <button
                           type="button"
                           onClick={() => onInspectQr(item)}
-                          className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-md transition-colors whitespace-nowrap shrink-0"
+                          className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-md transition-colors whitespace-nowrap shrink-0"
                         >
-                          <QrCode className="w-3.5 h-3.5" />
-                          Label QR
+                          <QrCode className="w-3.5 h-3.5 text-[#0d113a]" />
+                          Lihat Foto QR
                         </button>
+                      </td>
+                      <td className="py-3 px-4 text-center whitespace-nowrap">
+                        {normalizedImg ? (
+                          <button
+                            type="button"
+                            onClick={() => setPreviewPhotoItem(item)}
+                            className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-[#0d113a] bg-[#0d113a]/10 hover:bg-[#0d113a]/15 rounded-md transition-colors whitespace-nowrap shrink-0"
+                          >
+                            <ImageIcon className="w-3.5 h-3.5 text-[#e71f69]" />
+                            Lihat Foto
+                          </button>
+                        ) : (
+                          <span className="text-[11px] text-slate-400">
+                            Belum ada foto
+                          </span>
+                        )}
+                      </td>
+                      <td className="py-3 px-4 text-slate-600 max-w-xs">
+                        <p className="line-clamp-2" title={item.description}>
+                          {item.description || '-'}
+                        </p>
                       </td>
                     </tr>
                   );
@@ -464,6 +532,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
         </div>
       </section>
 
+      {/* Monthly Loan Report Section */}
       <section
         aria-label="Laporan Peminjaman Bulanan"
         className="bg-white border border-slate-200 rounded-lg overflow-hidden"
@@ -567,6 +636,7 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
           </table>
         </div>
 
+        {/* Filtered Month Transaction Detail Preview */}
         <div className="p-4 bg-slate-50/60 border-t border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs text-slate-600">
           <span>
             Menampilkan{' '}
@@ -585,6 +655,94 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
           </button>
         </div>
       </section>
+
+      {/* Modal Lihat Foto Barang */}
+      {previewPhotoItem && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="dashboard-item-photo-title"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4"
+        >
+          <div className="bg-white border border-slate-200 rounded-xl max-w-lg w-full p-6 shadow-xl space-y-4">
+            <div className="flex items-start justify-between gap-4 border-b border-slate-200 pb-3">
+              <div>
+                <h3
+                  id="dashboard-item-photo-title"
+                  className="text-base font-bold text-slate-900"
+                >
+                  {previewPhotoItem.name}
+                </h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  {previewPhotoItem.category} · {previewPhotoItem.location} ·{' '}
+                  <span className="font-mono">{previewPhotoItem.qrCode}</span>
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPreviewPhotoItem(null)}
+                className="p-1.5 text-slate-400 hover:text-slate-700 rounded-lg"
+                aria-label="Tutup pratinjau foto"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="rounded-lg overflow-hidden border border-slate-200 bg-slate-100 flex items-center justify-center min-h-[240px]">
+              {previewPhotoItem.imageUrl ? (
+                <img
+                  src={normalizeGoogleDriveImageUrl(previewPhotoItem.imageUrl)}
+                  alt={previewPhotoItem.name}
+                  referrerPolicy="no-referrer"
+                  onError={(e) =>
+                    handleDriveImageError(
+                      e,
+                      previewPhotoItem.imageUrl,
+                      previewPhotoItem.name
+                    )
+                  }
+                  className="w-full max-h-96 object-contain"
+                />
+              ) : (
+                <p className="text-xs text-slate-500 py-12">
+                  Barang ini belum memiliki foto.
+                </p>
+              )}
+            </div>
+
+            {previewPhotoItem.description && (
+              <p className="text-xs text-slate-600 bg-slate-50 p-3 rounded-lg border border-slate-200">
+                <strong className="text-slate-800">Deskripsi:</strong>{' '}
+                {previewPhotoItem.description}
+              </p>
+            )}
+
+            <div className="flex items-center justify-between pt-2 border-t border-slate-200">
+              {previewPhotoItem.imageUrl &&
+              previewPhotoItem.imageUrl.startsWith('http') ? (
+                <a
+                  href={previewPhotoItem.imageUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1.5 text-xs font-medium text-[#e71f69] hover:underline"
+                >
+                  <ExternalLink className="w-3.5 h-3.5" />
+                  Buka Sumber Gambar Asli
+                </a>
+              ) : (
+                <span />
+              )}
+              <button
+                type="button"
+                onClick={() => setPreviewPhotoItem(null)}
+                className="px-4 py-2 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors"
+              >
+                Tutup
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

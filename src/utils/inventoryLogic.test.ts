@@ -316,3 +316,45 @@ test('normalizeGoogleDriveImageUrl converts various Google Drive sharing links t
   const normalUrl = 'https://images.unsplash.com/photo-1516035069371';
   assert.equal(normalizeGoogleDriveImageUrl(normalUrl), normalUrl);
 });
+
+test('parseInventoryExcelXlsx preserves Google Drive imageUrl when customQr column is left empty', async () => {
+  const driveShareLink =
+    'https://drive.google.com/file/d/1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms/view?usp=sharing';
+  const rowsWithEmptyQr = [
+    {
+      name: 'Lensa Sony 18-105 MM',
+      category: 'Lensa',
+      totalStock: '2',
+      location: 'Lemari A-02',
+      condition: 'Baik',
+      customQr: '',
+      description: 'LENSA E MOUNT UNTUK KAMERA SONY',
+      imageUrl: driveShareLink,
+    },
+  ];
+
+  // Simulate Excel saving empty F2 cell as self-closing <c r="F2" s="2"/>
+  const rawBytes = buildInventoryExcelTemplateXlsx(rowsWithEmptyQr);
+  const decoder = new TextDecoder('utf-8');
+  const xmlText = decoder.decode(rawBytes);
+  assert.ok(xmlText.includes('Lensa Sony 18-105 MM'));
+
+  const parsed = await parseInventoryExcelXlsx(rawBytes);
+  assert.equal(parsed.length, 1);
+  assert.equal(parsed[0].name, 'Lensa Sony 18-105 MM');
+  assert.equal(parsed[0].customQr, '');
+  assert.equal(parsed[0].description, 'LENSA E MOUNT UNTUK KAMERA SONY');
+  assert.equal(
+    parsed[0].imageUrl,
+    'https://drive.google.com/thumbnail?id=1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms&sz=w1000'
+  );
+
+  const validated = validateBulkInventoryRows(parsed, 0);
+  assert.equal(validated.errors.length, 0);
+  assert.equal(validated.items[0].description, 'LENSA E MOUNT UNTUK KAMERA SONY');
+  assert.ok(validated.items[0].qrCode.startsWith('INV-LEN-'));
+  assert.equal(
+    validated.items[0].imageUrl,
+    'https://drive.google.com/thumbnail?id=1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms&sz=w1000'
+  );
+});

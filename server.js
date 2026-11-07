@@ -234,7 +234,7 @@ async function sendRealEmailViaSmtp(em) {
       secure: Boolean(smtpConfig.smtpSecure),
       auth: {
         user: smtpConfig.smtpUser,
-        pass: smtpConfig.smtpPass.replace(/\s+/g, ''),
+        pass: smtpConfig.smtpPass.replace(/\s+/g, ''), // strip spaces in 16-char Gmail App Password
       },
     });
 
@@ -340,6 +340,7 @@ async function initMysql() {
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
     `);
 
+    // Ensure delivery_status and delivery_error columns exist if table was created earlier
     try {
       await conn.query(
         `ALTER TABLE email_notifications ADD COLUMN delivery_status VARCHAR(32) DEFAULT 'pending'`
@@ -353,6 +354,14 @@ async function initMysql() {
       );
     } catch {
       // column already exists
+    }
+    // Ensure photo and image columns use LONGTEXT so base64 photos are never truncated
+    try {
+      await conn.query(`ALTER TABLE inventory_items MODIFY COLUMN image_url LONGTEXT`);
+      await conn.query(`ALTER TABLE loans MODIFY COLUMN borrow_photo_url LONGTEXT`);
+      await conn.query(`ALTER TABLE loans MODIFY COLUMN return_photo_url LONGTEXT NULL`);
+    } catch {
+      // ignore if already LONGTEXT
     }
 
     await conn.query(`
@@ -397,6 +406,7 @@ async function initMysql() {
       );
     }
 
+    // Ensure default master admin exists
     await conn.query(`
       INSERT IGNORE INTO users (id, name, email, password, role, department, phone, active, created_at)
       VALUES (
@@ -424,6 +434,7 @@ async function initMysql() {
 
 initMysql();
 
+// Helper to format ISO date safely
 function toMysqlDatetime(isoStr) {
   if (!isoStr) return null;
   const d = new Date(isoStr);
@@ -548,6 +559,10 @@ async function runServerAutoEmailDispatcher() {
 
 setInterval(runServerAutoEmailDispatcher, 60 * 1000);
 
+// ==========================================
+// REST API ENDPOINTS
+// ==========================================
+
 // 1. GET State
 app.get('/api/state', async (_req, res) => {
   res.setHeader('Cache-Control', 'no-store');
@@ -649,10 +664,12 @@ app.get('/api/state', async (_req, res) => {
   }
 });
 
-// 2. POST State Sync
+// 2. POST State Sync (Syncs additions, updates, deletions, AND dispatches new emails via SMTP)
 app.post('/api/state', async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   const { users, items, loans, emails } = req.body || {};
+
+  // Dispatch any newly added emails via real SMTP in background/parallel
   const incomingEmails = Array.isArray(emails) ? emails : [];
 
   if (!useMysql || !pool) {
@@ -671,6 +688,7 @@ app.post('/api/state', async (req, res) => {
   try {
     await conn.beginTransaction();
 
+    // Sync Users (Upsert + Delete removed users)
     if (Array.isArray(users)) {
       if (users.length > 0) {
         const userIds = users.map(u => u.id);
@@ -702,6 +720,7 @@ app.post('/api/state', async (req, res) => {
       }
     }
 
+    // Sync Items (Upsert + Delete removed items)
     if (Array.isArray(items)) {
       if (items.length > 0) {
         const itemIds = items.map(it => it.id);
@@ -740,6 +759,7 @@ app.post('/api/state', async (req, res) => {
       }
     }
 
+    // Sync Loans (Upsert + Delete removed loans)
     if (Array.isArray(loans)) {
       if (loans.length > 0) {
         const loanIds = loans.map(ln => ln.id);
@@ -752,6 +772,9 @@ app.post('/api/state', async (req, res) => {
           `INSERT INTO loans (id, item_id, user_id, quantity, borrow_date, due_date, return_date, duration_days, purpose_notes, return_notes, borrow_photo_url, return_photo_url, status, reminder_sent_at, overdue_email_sent_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON DUPLICATE KEY UPDATE
+             quantity = VALUES(quantity),
+             purpose_notes = VALUES(purpose_notes),
+             borrow_photo_url = VALUES(borrow_photo_url),
              return_date = VALUES(return_date),
              return_notes = VALUES(return_notes),
              return_photo_url = VALUES(return_photo_url),
@@ -779,6 +802,7 @@ app.post('/api/state', async (req, res) => {
       }
     }
 
+    // Check existing email delivery statuses in DB so we only send new ones via SMTP
     if (Array.isArray(emails)) {
       const [existingEmailRows] = await conn.query(
         `SELECT id, delivery_status FROM email_notifications`
@@ -876,7 +900,7 @@ app.post('/api/send-email', async (req, res) => {
   });
 });
 
-// 4. GET & POST SMTP Configuration
+// 4. GET & POST SMTP Configuration (for Admin Dashboard)
 app.get('/api/smtp-config', (_req, res) => {
   res.json({
     smtpHost: smtpConfig.smtpHost,
@@ -975,6 +999,52 @@ app.post('/api/smtp-test', async (req, res) => {
     ok: true,
     message: `Email tes berhasil dikirim langsung ke kotak masuk ${recipient}! Silakan cek Inbox / Spam.`,
   });
+});
+
+// 6. Google Drive Image Proxy (Bypasses browser 3rd-party cookie / ORB blocks)
+app.get('/api/drive-image/:fileId', async (req, res) => {
+  const fileId = String(req.params.fileId || '').replace(/[^a-zA-Z0-9_-]/g, '');
+  if (!fileId) {
+    return res.status(400).send('Invalid Google Drive fileId');
+  }
+
+  const candidateUrls = [
+    `https://lh3.googleusercontent.com/d/${fileId}=w1000`,
+    `https://drive.google.com/thumbnail?id=${fileId}&sz=w1000`,
+    `https://drive.google.com/uc?export=download&id=${fileId}`,
+  ];
+
+  for (const targetUrl of candidateUrls) {
+    try {
+      const upstream = await fetch(targetUrl, {
+        headers: {
+          'User-Agent':
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+          Accept: 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
+        },
+        redirect: 'follow',
+      });
+      if (!upstream.ok) continue;
+      const contentType = upstream.headers.get('content-type') || '';
+      if (!contentType.startsWith('image/') && !contentType.includes('octet-stream')) {
+        continue;
+      }
+      const arrayBuf = await upstream.arrayBuffer();
+      const buf = Buffer.from(arrayBuf);
+      if (buf.length < 100) continue;
+
+      res.setHeader(
+        'Content-Type',
+        contentType.startsWith('image/') ? contentType : 'image/jpeg'
+      );
+      res.setHeader('Cache-Control', 'public, max-age=86400');
+      return res.send(buf);
+    } catch {
+      // try next candidate URL
+    }
+  }
+
+  return res.status(404).send('Google Drive image not accessible');
 });
 
 app.use(express.static(distPath));
