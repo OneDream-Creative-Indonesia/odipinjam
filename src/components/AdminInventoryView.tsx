@@ -3,6 +3,7 @@ import { BulkInventoryRowInput, InventoryItem } from '../types/inventory';
 import {
   buildInventoryExcelTemplateXlsx,
   generateQrCodeString,
+  normalizeGoogleDriveImageUrl,
   parseInventoryExcelXlsx,
   parseSpreadsheetTextToRows,
   validateBulkInventoryRows,
@@ -296,6 +297,8 @@ export const AdminInventoryView: React.FC<AdminInventoryViewProps> = ({
       return;
     }
 
+    const finalImage = normalizeGoogleDriveImageUrl(itemImageUrl.trim());
+
     onAddItem({
       qrCode: finalQr,
       name: cleanName,
@@ -307,7 +310,7 @@ export const AdminInventoryView: React.FC<AdminInventoryViewProps> = ({
       description:
         description.trim() ||
         `Unit inventaris ${cleanName} (${category.trim() || 'Umum'})`,
-      ...(itemImageUrl.trim() ? { imageUrl: itemImageUrl.trim() } : {}),
+      ...(finalImage ? { imageUrl: finalImage } : {}),
     });
 
     setFormSuccess(
@@ -361,6 +364,8 @@ export const AdminInventoryView: React.FC<AdminInventoryViewProps> = ({
       return;
     }
 
+    const finalEditImage = normalizeGoogleDriveImageUrl(editImageUrl.trim());
+
     onEditItem({
       ...editingItem,
       name: cleanName,
@@ -372,7 +377,7 @@ export const AdminInventoryView: React.FC<AdminInventoryViewProps> = ({
       description:
         editDescription.trim() ||
         `Unit inventaris ${cleanName} (${editCategory.trim() || 'Umum'})`,
-      imageUrl: editImageUrl.trim() || undefined,
+      imageUrl: finalEditImage || undefined,
     });
 
     setEditingItem(null);
@@ -405,8 +410,10 @@ export const AdminInventoryView: React.FC<AdminInventoryViewProps> = ({
     field: keyof BulkInventoryRowInput,
     value: string
   ) => {
+    const finalVal =
+      field === 'imageUrl' ? normalizeGoogleDriveImageUrl(value) : value;
     setBulkRows((prev) =>
-      prev.map((r) => (r.rowId === rowId ? { ...r, [field]: value } : r))
+      prev.map((r) => (r.rowId === rowId ? { ...r, [field]: finalVal } : r))
     );
   };
 
@@ -690,6 +697,23 @@ export const AdminInventoryView: React.FC<AdminInventoryViewProps> = ({
             </div>
           </div>
 
+          {/* Google Drive Photo Link Guide Callout */}
+          <div className="p-4 bg-sky-50/80 border border-sky-200 rounded-lg text-xs text-sky-950 space-y-2">
+            <div className="font-semibold flex items-center gap-2 text-sky-900">
+              <Sparkles className="w-4 h-4 text-[#e71f69]" />
+              <span>Cara Menggunakan Foto Barang dari Google Drive di Template Excel (Bulk Import):</span>
+            </div>
+            <ol className="list-decimal list-inside space-y-1 text-sky-900 leading-relaxed pl-1">
+              <li>Upload foto fisik barang Anda ke <strong>Google Drive</strong>.</li>
+              <li>Klik kanan foto di Google Drive &rarr; pilih <strong>Bagikan (Share)</strong> &rarr; pada <em>Akses Umum</em>, ubah menjadi <strong>Siapa saja yang memiliki link (Anyone with the link)</strong>.</li>
+              <li>Klik <strong>Salin Link (Copy link)</strong>.</li>
+              <li>Tempel (Paste) link tersebut ke <strong>Kolom H (Gambar Barang)</strong> di file Excel atau pada kolom tabel di bawah.</li>
+            </ol>
+            <p className="text-[11px] text-sky-700 italic">
+              * Sistem ODipinjam secara otomatis mengonversi link sharing Google Drive menjadi gambar langsung yang tampil di dasbor, modal bukti foto, dan kartu label QR.
+            </p>
+          </div>
+
           {bulkFileName && (
             <p className="text-xs text-sky-700 font-medium bg-sky-50 border border-sky-200 rounded-lg px-3 py-2">
               Sumber data dimuat ke dalam kolom: <strong>{bulkFileName}</strong>
@@ -808,7 +832,7 @@ export const AdminInventoryView: React.FC<AdminInventoryViewProps> = ({
                               placeholder={
                                 row.imageUrl?.startsWith('data:image/')
                                   ? 'File foto terlampir'
-                                  : 'Atau tempel URL foto...'
+                                  : 'Tempel link Google Drive atau URL foto...'
                               }
                               aria-label={`URL Gambar baris ${idx + 1}`}
                               className="w-full px-2 py-1 text-[11px] bg-slate-50 border border-slate-200 rounded text-slate-800 focus:outline-none focus:border-sky-600"
@@ -1191,7 +1215,7 @@ export const AdminInventoryView: React.FC<AdminInventoryViewProps> = ({
                   placeholder={
                     itemImageUrl.startsWith('data:image/')
                       ? 'File foto fisik barang telah dilampirkan'
-                      : 'Atau tempel URL gambar (https://...)'
+                      : 'Atau tempel link Google Drive / URL gambar (https://...)'
                   }
                   className="flex-1 px-3 py-2 text-xs bg-white border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-sky-600"
                 />
@@ -1671,7 +1695,7 @@ export const AdminInventoryView: React.FC<AdminInventoryViewProps> = ({
                     placeholder={
                       editImageUrl.startsWith('data:image/')
                         ? 'File foto terlampir'
-                        : 'Atau tempel URL gambar (https://...)'
+                        : 'Atau tempel link Google Drive / URL gambar (https://...)'
                     }
                     className="flex-1 px-3 py-1.5 text-xs bg-white border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-sky-600"
                   />
