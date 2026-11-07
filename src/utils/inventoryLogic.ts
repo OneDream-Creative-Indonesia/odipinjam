@@ -326,6 +326,45 @@ export function calculateDueState(
   };
 }
 
+// ============================================================================
+// IMAGE & GOOGLE DRIVE LINK NORMALIZATION
+// ============================================================================
+
+/**
+ * Detects Google Drive sharing or preview URLs and automatically converts them
+ * to direct thumbnail/image streaming URLs (high-resolution) so they render
+ * reliably in <img> elements without broken images.
+ *
+ * Supported formats:
+ * - https://drive.google.com/file/d/FILE_ID/view?usp=sharing
+ * - https://drive.google.com/file/d/FILE_ID/view
+ * - https://drive.google.com/file/d/FILE_ID
+ * - https://drive.google.com/open?id=FILE_ID
+ * - https://drive.google.com/uc?id=FILE_ID
+ * - https://drive.google.com/uc?export=view&id=FILE_ID
+ */
+export function normalizeGoogleDriveImageUrl(url: string): string {
+  const clean = (url || '').trim();
+  if (!clean) return '';
+  if (!clean.includes('drive.google.com') && !clean.includes('docs.google.com')) {
+    return clean;
+  }
+
+  // 1. Match /file/d/FILE_ID
+  const fileDMatch = /\/file\/d\/([a-zA-Z0-9_-]+)/i.exec(clean);
+  if (fileDMatch && fileDMatch[1]) {
+    return `https://drive.google.com/thumbnail?id=${fileDMatch[1]}&sz=w1000`;
+  }
+
+  // 2. Match id=FILE_ID parameter
+  const idParamMatch = /[?&]id=([a-zA-Z0-9_-]+)/i.exec(clean);
+  if (idParamMatch && idParamMatch[1]) {
+    return `https://drive.google.com/thumbnail?id=${idParamMatch[1]}&sz=w1000`;
+  }
+
+  return clean;
+}
+
 /**
  * Validates structured column rows (from the website's column grid or parsed Excel/CSV file)
  * into ready-to-import InventoryItem objects.
@@ -371,7 +410,9 @@ export function validateBulkInventoryRows(
     const description =
       String(row.description || '').trim() ||
       `Barang inventaris kategori ${category}`;
-    const imageUrl = String(row.imageUrl || '').trim();
+    const imageUrl = normalizeGoogleDriveImageUrl(
+      String(row.imageUrl || '').trim()
+    );
 
     if (!name) {
       errors.push(`Baris ${rowNum}: Nama barang wajib diisi.`);
@@ -476,7 +517,7 @@ export function parseSpreadsheetTextToRows(
         condition: (cols[4] || 'Baik').trim() || 'Baik',
         customQr: (cols[5] || '').trim(),
         description: (cols[6] || '').trim(),
-        imageUrl: (cols[7] || '').trim(),
+        imageUrl: normalizeGoogleDriveImageUrl((cols[7] || '').trim()),
       }));
     }
   }
@@ -551,7 +592,7 @@ export function parseSpreadsheetTextToRows(
       condition: (cols[4] || 'Baik').trim() || 'Baik',
       customQr: (cols[5] || '').trim(),
       description: (cols[6] || '').trim(),
-      imageUrl: (cols[7] || '').trim(),
+      imageUrl: normalizeGoogleDriveImageUrl((cols[7] || '').trim()),
     });
   }
 
@@ -560,6 +601,8 @@ export function parseSpreadsheetTextToRows(
 
 /**
  * Parses CSV, semicolon-delimited Excel CSV, or TSV spreadsheet rows into inventory items.
+ * Expected columns (header optional):
+ * Nama Barang, Kategori, Total Stok, Lokasi, Kondisi, Kode QR (opsional), Deskripsi (opsional), Gambar Barang (opsional)
  */
 export function parseBulkInventoryCsv(
   rawText: string,
@@ -797,12 +840,13 @@ export function buildInventoryExcelTemplateXlsx(
     const crc = computeCrc32(entry.data);
     const size = entry.data.length;
 
+    // Local file header (30 bytes + name)
     const localHeader = new Uint8Array(30 + nameBytes.length);
     const lv = new DataView(localHeader.buffer);
     lv.setUint32(0, 0x04034b50, true);
     lv.setUint16(4, 20, true);
     lv.setUint16(6, 0, true);
-    lv.setUint16(8, 0, true);
+    lv.setUint16(8, 0, true); // Store (0)
     lv.setUint16(10, 0, true);
     lv.setUint16(12, 0x5421, true);
     lv.setUint32(14, crc, true);
@@ -814,6 +858,7 @@ export function buildInventoryExcelTemplateXlsx(
 
     localChunks.push(localHeader, entry.data);
 
+    // Central directory header (46 bytes + name)
     const cdHeader = new Uint8Array(46 + nameBytes.length);
     const cv = new DataView(cdHeader.buffer);
     cv.setUint32(0, 0x02014b50, true);
@@ -917,6 +962,7 @@ export async function parseInventoryExcelXlsx(
   const bytes = input instanceof Uint8Array ? input : new Uint8Array(input);
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 
+  // Locate End of Central Directory (0x06054b50)
   let eocdPos = -1;
   for (let i = bytes.length - 22; i >= Math.max(0, bytes.length - 65557); i--) {
     if (view.getUint32(i, true) === 0x06054b50) {
@@ -966,6 +1012,7 @@ export async function parseInventoryExcelXlsx(
     }
   }
 
+  // 1. Parse sharedStrings.xml if present
   const sharedStrings: string[] = [];
   const ssBytes = files.get('xl/sharedStrings.xml');
   if (ssBytes) {
@@ -980,6 +1027,7 @@ export async function parseInventoryExcelXlsx(
     }
   }
 
+  // 2. Extract embedded images from xl/media/* if user inserted pictures in Excel
   const mediaDataUrls = new Map<string, string>();
   const orderedMediaDataUrls: string[] = [];
   for (const [path, fileBytes] of files.entries()) {
@@ -997,6 +1045,7 @@ export async function parseInventoryExcelXlsx(
     }
   }
 
+  // Map 0-based Excel row index -> embedded image dataUrl via drawing1.xml
   const rowEmbeddedImages = new Map<number, string>();
   const drawingRelsBytes = files.get('xl/drawings/_rels/drawing1.xml.rels');
   const drawingBytes = files.get('xl/drawings/drawing1.xml');
@@ -1036,6 +1085,7 @@ export async function parseInventoryExcelXlsx(
     }
   }
 
+  // 3. Parse first worksheet
   const sheetBytes =
     files.get('xl/worksheets/sheet1.xml') ||
     Array.from(files.entries()).find(([k]) =>
@@ -1110,8 +1160,12 @@ export async function parseInventoryExcelXlsx(
     const { rowNumber1Based, cols } = parsedGrid[i];
     const excelRow0Based = rowNumber1Based - 1;
     const embeddedImg = rowEmbeddedImages.get(excelRow0Based);
-    let imageUrl = (cols[7] || '').trim() || embeddedImg || '';
+    let imageUrl =
+      normalizeGoogleDriveImageUrl((cols[7] || '').trim()) ||
+      embeddedImg ||
+      '';
 
+    // If user embedded images without drawing anchors (e.g. Place in Cell) and cell is #VALUE! or empty
     if (
       (!imageUrl || imageUrl === '#VALUE!' || imageUrl.startsWith('_xlfn')) &&
       rowEmbeddedImages.size === 0 &&
@@ -1240,6 +1294,9 @@ const INDONESIAN_MONTHS = [
   'Desember',
 ];
 
+/**
+ * Aggregates loan records into monthly reports sorted newest first.
+ */
 export function computeMonthlyLoanReport(
   loans: LoanRecord[],
   referenceTimeIso: string = new Date().toISOString()
@@ -1318,6 +1375,9 @@ export function computeMonthlyLoanReport(
   return summaries.sort((a, b) => b.monthKey.localeCompare(a.monthKey));
 }
 
+/**
+ * Validates member borrow submission.
+ */
 export function validateBorrowRequest(params: {
   item?: InventoryItem;
   quantity: number;
@@ -1368,6 +1428,9 @@ export function validateBorrowRequest(params: {
   return { valid: true };
 }
 
+/**
+ * Authenticates a user by email and password, optionally enforcing the selected login role tab.
+ */
 export function authenticateUser(
   users: User[],
   email: string,
