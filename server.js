@@ -363,6 +363,11 @@ async function initMysql() {
     } catch {
       // ignore if already LONGTEXT
     }
+    try {
+      await conn.query(`ALTER TABLE loans ADD COLUMN duration_hours INT UNSIGNED DEFAULT 0`);
+    } catch {
+      // ignore if already exists
+    }
 
     await conn.query(`
       CREATE TABLE IF NOT EXISTS smtp_settings (
@@ -571,6 +576,18 @@ app.get('/api/state', async (_req, res) => {
   }
 
   try {
+    // Self-heal available_stock from active loans so stock is always 100% accurate
+    await pool.query(`
+      UPDATE inventory_items i
+      LEFT JOIN (
+        SELECT item_id, SUM(quantity) AS borrowed_qty
+        FROM loans
+        WHERE status = 'dipinjam'
+        GROUP BY item_id
+      ) l ON i.id = l.item_id
+      SET i.available_stock = GREATEST(0, CAST(i.total_stock AS SIGNED) - COALESCE(l.borrowed_qty, 0))
+    `);
+
     const [userRows] = await pool.query('SELECT * FROM users');
     const [itemRows] = await pool.query('SELECT * FROM inventory_items ORDER BY created_at DESC');
     const [loanRows] = await pool.query(`
@@ -624,6 +641,7 @@ app.get('/api/state', async (_req, res) => {
       dueDate: l.due_date ? new Date(l.due_date).toISOString() : '',
       returnDate: l.return_date ? new Date(l.return_date).toISOString() : undefined,
       durationDays: Number(l.duration_days),
+      durationHours: Number(l.duration_hours) || 0,
       purposeNotes: l.purpose_notes || '',
       returnNotes: l.return_notes || undefined,
       borrowPhotoDataUrl: l.borrow_photo_url || '',
@@ -669,22 +687,56 @@ app.post('/api/state', async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   const { users, items, loans, emails } = req.body || {};
 
-  // Dispatch any newly added emails via real SMTP in background/parallel
   const incomingEmails = Array.isArray(emails) ? emails : [];
 
   if (!useMysql || !pool) {
-    for (const em of incomingEmails) {
-      if (!sentEmailIds.has(em.id) && em.deliveryStatus !== 'sent') {
-        const smtpRes = await sendRealEmailViaSmtp(em);
-        em.deliveryStatus = smtpRes.sent ? 'sent' : 'failed';
-        em.deliveryError = smtpRes.error || undefined;
+    // Reconcile item availableStock from active loans in fallback memory mode
+    const nextLoansList = Array.isArray(loans) ? loans : memoryDb.loans;
+    const rawItemsList = Array.isArray(items) ? items : memoryDb.items;
+    const reconciledItems = rawItemsList.map(it => {
+      const borrowed = nextLoansList
+        .filter(
+          l =>
+            l.status === 'dipinjam' &&
+            (l.itemId === it.id ||
+              (l.itemQrCode &&
+                it.qrCode &&
+                String(l.itemQrCode).toLowerCase() === String(it.qrCode).toLowerCase()))
+        )
+        .reduce((acc, l) => acc + (Number(l.quantity) || 1), 0);
+      return {
+        ...it,
+        availableStock: Math.max(0, Math.min(Number(it.totalStock) || 1, (Number(it.totalStock) || 1) - borrowed)),
+      };
+    });
+
+    saveDbToDisk({
+      users,
+      items: reconciledItems,
+      loans: nextLoansList,
+      emails: incomingEmails,
+    });
+    res.json({ ok: true, state: memoryDb });
+
+    // Dispatch any newly added emails via SMTP asynchronously in background
+    (async () => {
+      let changed = false;
+      for (const em of memoryDb.emails) {
+        if (!sentEmailIds.has(em.id) && em.deliveryStatus !== 'sent') {
+          const smtpRes = await sendRealEmailViaSmtp(em);
+          em.deliveryStatus = smtpRes.sent ? 'sent' : 'failed';
+          em.deliveryError = smtpRes.error || undefined;
+          changed = true;
+        }
       }
-    }
-    saveDbToDisk({ users, items, loans, emails: incomingEmails });
-    return res.json({ ok: true, state: memoryDb });
+      if (changed) saveDbToDisk(memoryDb);
+    })().catch(() => {});
+    return;
   }
 
   const conn = await pool.getConnection();
+  const emailsToDispatchInBackground = [];
+
   try {
     await conn.beginTransaction();
 
@@ -769,10 +821,14 @@ app.post('/api/state', async (req, res) => {
       }
       for (const ln of loans) {
         await conn.query(
-          `INSERT INTO loans (id, item_id, user_id, quantity, borrow_date, due_date, return_date, duration_days, purpose_notes, return_notes, borrow_photo_url, return_photo_url, status, reminder_sent_at, overdue_email_sent_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `INSERT INTO loans (id, item_id, user_id, quantity, borrow_date, due_date, return_date, duration_days, duration_hours, purpose_notes, return_notes, borrow_photo_url, return_photo_url, status, reminder_sent_at, overdue_email_sent_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON DUPLICATE KEY UPDATE
              quantity = VALUES(quantity),
+             borrow_date = VALUES(borrow_date),
+             due_date = VALUES(due_date),
+             duration_days = VALUES(duration_days),
+             duration_hours = VALUES(duration_hours),
              purpose_notes = VALUES(purpose_notes),
              borrow_photo_url = VALUES(borrow_photo_url),
              return_date = VALUES(return_date),
@@ -789,7 +845,8 @@ app.post('/api/state', async (req, res) => {
             toMysqlDatetime(ln.borrowDate) || new Date(),
             toMysqlDatetime(ln.dueDate) || new Date(),
             toMysqlDatetime(ln.returnDate),
-            Number(ln.durationDays) || 1,
+            Number(ln.durationDays) || 0,
+            Number(ln.durationHours) || 0,
             ln.purposeNotes || '',
             ln.returnNotes || null,
             ln.borrowPhotoDataUrl || null,
@@ -802,7 +859,19 @@ app.post('/api/state', async (req, res) => {
       }
     }
 
-    // Check existing email delivery statuses in DB so we only send new ones via SMTP
+    // Always recalculate inventory_items.available_stock directly from active loans inside the transaction
+    await conn.query(`
+      UPDATE inventory_items i
+      LEFT JOIN (
+        SELECT item_id, SUM(quantity) AS borrowed_qty
+        FROM loans
+        WHERE status = 'dipinjam'
+        GROUP BY item_id
+      ) l ON i.id = l.item_id
+      SET i.available_stock = GREATEST(0, CAST(i.total_stock AS SIGNED) - COALESCE(l.borrowed_qty, 0))
+    `);
+
+    // Save email notifications to DB quickly, and queue any unsent ones for background SMTP delivery
     if (Array.isArray(emails)) {
       const [existingEmailRows] = await conn.query(
         `SELECT id, delivery_status FROM email_notifications`
@@ -818,13 +887,11 @@ app.post('/api/state', async (req, res) => {
 
       for (const em of emails) {
         const prevStatus = dbSentMap.get(em.id);
-        let deliveryStatus = prevStatus || em.deliveryStatus || 'pending';
-        let deliveryError = em.deliveryError || null;
+        const deliveryStatus = prevStatus || em.deliveryStatus || 'pending';
+        const deliveryError = em.deliveryError || null;
 
         if (deliveryStatus !== 'sent' && !sentEmailIds.has(em.id) && !prevStatus) {
-          const smtpRes = await sendRealEmailViaSmtp(em);
-          deliveryStatus = smtpRes.sent ? 'sent' : 'failed';
-          deliveryError = smtpRes.error || null;
+          emailsToDispatchInBackground.push(em);
         }
 
         await conn.query(
@@ -840,8 +907,8 @@ app.post('/api/state', async (req, res) => {
             em.recipientName,
             em.userId,
             em.loanId,
-            em.itemName,
-            em.itemQrCode,
+            em.itemName || '',
+            em.itemQrCode || '',
             em.type,
             em.subject,
             em.body,
@@ -860,8 +927,27 @@ app.post('/api/state', async (req, res) => {
     await conn.rollback();
     console.error('Error writing state to MySQL:', err);
     res.status(500).json({ error: 'Database transaction failed', details: err.message });
+    return;
   } finally {
     conn.release();
+  }
+
+  // Dispatch newly queued SMTP emails asynchronously AFTER transaction commit
+  if (emailsToDispatchInBackground.length > 0 && pool) {
+    (async () => {
+      for (const em of emailsToDispatchInBackground) {
+        const smtpRes = await sendRealEmailViaSmtp(em);
+        const status = smtpRes.sent ? 'sent' : 'failed';
+        try {
+          await pool.query(
+            `UPDATE email_notifications SET delivery_status = ?, delivery_error = ? WHERE id = ?`,
+            [status, smtpRes.error || null, em.id]
+          );
+        } catch (err) {
+          console.warn('Failed to update background email status:', err.message);
+        }
+      }
+    })().catch(() => {});
   }
 });
 

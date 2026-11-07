@@ -7,12 +7,14 @@ import {
   calculateDueState,
   computeMonthlyLoanReport,
   formatDateInputLocal,
+  formatLoanDuration,
   generateQrCodeString,
   generateQrMatrix,
   normalizeGoogleDriveImageUrl,
   parseBulkInventoryCsv,
   parseInventoryExcelXlsx,
   parseLocalEndOfDayIso,
+  reconcileItemsAvailableStock,
   validateBorrowRequest,
   validateBulkInventoryRows,
 } from './inventoryLogic';
@@ -356,5 +358,72 @@ test('parseInventoryExcelXlsx preserves Google Drive imageUrl when customQr colu
   assert.equal(
     validated.items[0].imageUrl,
     'https://drive.google.com/thumbnail?id=1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms&sz=w1000'
+  );
+});
+
+test('reconcileItemsAvailableStock accurately recalculates availableStock from active loans when items are borrowed or returned', () => {
+  const items: InventoryItem[] = [
+    {
+      id: 'itm-1',
+      qrCode: 'INV-FOT-KAM-0001',
+      name: 'Kamera Sony A7IV',
+      category: 'Fotografi',
+      totalStock: 5,
+      availableStock: 1, // out of sync initial value
+      location: 'Lemari A',
+      condition: 'Baik',
+      description: 'Kamera utama',
+      createdAt: '2026-01-01T00:00:00.000Z',
+    },
+  ];
+
+  const activeLoans: LoanRecord[] = [
+    {
+      id: 'ln-1',
+      itemId: 'itm-1',
+      itemQrCode: 'INV-FOT-KAM-0001',
+      itemName: 'Kamera Sony A7IV',
+      itemCategory: 'Fotografi',
+      userId: 'usr-1',
+      userName: 'Septian',
+      userEmail: 'septian@test.id',
+      userDepartment: 'Media',
+      quantity: 2,
+      borrowDate: '2026-11-08T08:00:00.000Z',
+      dueDate: '2026-11-08T14:00:00.000Z',
+      durationDays: 0,
+      durationHours: 6,
+      purposeNotes: 'Liputan pagi',
+      borrowPhotoDataUrl: 'data:image/jpeg;base64,abc',
+      status: 'dipinjam',
+    },
+  ];
+
+  const afterBorrow = reconcileItemsAvailableStock(items, activeLoans);
+  assert.equal(afterBorrow[0].availableStock, 3); // 5 total - 2 borrowed = 3
+
+  // Now simulate returning the loan
+  const returnedLoans: LoanRecord[] = activeLoans.map((l) => ({
+    ...l,
+    status: 'dikembalikan',
+    returnDate: '2026-11-08T13:00:00.000Z',
+  }));
+
+  const afterReturn = reconcileItemsAvailableStock(afterBorrow, returnedLoans);
+  assert.equal(afterReturn[0].availableStock, 5); // 5 total - 0 borrowed = 5
+});
+
+test('formatLoanDuration formats day and hour durations accurately', () => {
+  assert.equal(
+    formatLoanDuration({ durationDays: 0, durationHours: 4 }),
+    '4 jam'
+  );
+  assert.equal(
+    formatLoanDuration({ durationDays: 2, durationHours: 5 }),
+    '2 hari 5 jam'
+  );
+  assert.equal(
+    formatLoanDuration({ durationDays: 3, durationHours: 0 }),
+    '3 hari'
   );
 });

@@ -1690,7 +1690,7 @@ export function validateBorrowRequest(params: {
   if (Number.isNaN(bTime) || Number.isNaN(dTime) || dTime <= bTime) {
     return {
       valid: false,
-      error: 'Tanggal pengembalian harus setelah waktu peminjaman.',
+      error: 'Waktu pengembalian (tanggal & jam) harus setelah waktu mulai peminjaman.',
     };
   }
   if (!purposeNotes || purposeNotes.trim().length < 5) {
@@ -1707,6 +1707,83 @@ export function validateBorrowRequest(params: {
   }
 
   return { valid: true };
+}
+
+/**
+ * Ensures every item's availableStock is strictly synchronized with active loans
+ * (`status === 'dipinjam'`), matching by itemId or itemQrCode.
+ */
+export function reconcileItemsAvailableStock(
+  items: InventoryItem[],
+  loans: LoanRecord[]
+): InventoryItem[] {
+  const activeLoans = loans.filter((l) => l.status === 'dipinjam');
+  return items.map((item) => {
+    const borrowedUnits = activeLoans.reduce((sum, l) => {
+      const matchesId = l.itemId === item.id;
+      const matchesQr =
+        Boolean(l.itemQrCode) &&
+        Boolean(item.qrCode) &&
+        l.itemQrCode.trim().toLowerCase() === item.qrCode.trim().toLowerCase();
+      return matchesId || matchesQr ? sum + (Number(l.quantity) || 1) : sum;
+    }, 0);
+
+    const nextAvailable = Math.max(
+      0,
+      Math.min(item.totalStock, item.totalStock - borrowedUnits)
+    );
+    if (nextAvailable === item.availableStock) return item;
+    return {
+      ...item,
+      availableStock: nextAvailable,
+    };
+  });
+}
+
+/**
+ * Formats an ISO date string into Indonesian date + time (e.g. "08 Nov 2026, 14:30").
+ */
+export function formatLoanDateTime(isoStr?: string): string {
+  if (!isoStr) return '-';
+  const d = new Date(isoStr);
+  if (Number.isNaN(d.getTime())) return isoStr;
+  const datePart = d.toLocaleDateString('id-ID', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+  });
+  const hours = String(d.getHours()).padStart(2, '0');
+  const mins = String(d.getMinutes()).padStart(2, '0');
+  return `${datePart}, ${hours}:${mins}`;
+}
+
+/**
+ * Formats a loan's duration into days and hours (e.g., "2 Hari 4 Jam", "5 Jam", "3 Hari").
+ */
+export function formatLoanDuration(
+  loan: Partial<
+    Pick<
+      LoanRecord,
+      'borrowDate' | 'dueDate' | 'durationDays' | 'durationHours'
+    >
+  >
+): string {
+  const bMs = loan.borrowDate ? new Date(loan.borrowDate).getTime() : NaN;
+  const dMs = loan.dueDate ? new Date(loan.dueDate).getTime() : NaN;
+  if (!Number.isNaN(bMs) && !Number.isNaN(dMs) && dMs > bMs) {
+    const totalHours = Math.max(1, Math.round((dMs - bMs) / (1000 * 3600)));
+    const days = Math.floor(totalHours / 24);
+    const hours = totalHours % 24;
+    if (days > 0 && hours > 0) return `${days} hari ${hours} jam`;
+    if (days > 0) return `${days} hari`;
+    return `${hours} jam`;
+  }
+  const dDays = Number(loan.durationDays) || 0;
+  const dHours = Number(loan.durationHours) || 0;
+  if (dDays > 0 && dHours > 0) return `${dDays} hari ${dHours} jam`;
+  if (dDays > 0) return `${dDays} hari`;
+  if (dHours > 0) return `${dHours} jam`;
+  return '1 hari';
 }
 
 /**

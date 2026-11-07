@@ -3,7 +3,11 @@ import {
   EmailNotification,
   LoanRecord,
 } from '../types/inventory';
-import { calculateDueState } from '../utils/inventoryLogic';
+import {
+  calculateDueState,
+  formatLoanDateTime,
+  formatLoanDuration,
+} from '../utils/inventoryLogic';
 import { createEquipmentPhotoProofSvg } from '../data/seedData';
 import {
   AlertTriangle,
@@ -880,14 +884,17 @@ export const AdminLoansAndEmailsView: React.FC<AdminLoansAndEmailsViewProps> = (
                       </td>
                       <td className="py-3 px-4 font-mono tabular-nums text-slate-600 whitespace-nowrap">
                         <div>
-                          Pinjam:{' '}
-                          {new Date(loan.borrowDate).toLocaleDateString('id-ID')}
+                          Pinjam: {formatLoanDateTime(loan.borrowDate)}
                         </div>
                         <div className="text-slate-900 font-medium">
-                          Batas:{' '}
-                          {new Date(loan.dueDate).toLocaleDateString('id-ID')}{' '}
-                          ({loan.durationDays} hr)
+                          Batas: {formatLoanDateTime(loan.dueDate)} (
+                          {formatLoanDuration(loan)})
                         </div>
+                        {loan.returnDate && (
+                          <div className="text-emerald-700 font-medium">
+                            Kembali: {formatLoanDateTime(loan.returnDate)}
+                          </div>
+                        )}
                       </td>
                       <td className="py-3 px-4 max-w-xs">
                         <p className="text-slate-800 line-clamp-2">

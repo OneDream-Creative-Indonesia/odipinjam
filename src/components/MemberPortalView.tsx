@@ -7,6 +7,8 @@ import {
 } from '../types/inventory';
 import {
   calculateDueState,
+  formatLoanDateTime,
+  formatLoanDuration,
   handleDriveImageError,
   normalizeGoogleDriveImageUrl,
   validateBorrowRequest,
@@ -14,6 +16,7 @@ import {
 import { QrCodeSvg } from './QrCodeSvg';
 import {
   AlertTriangle,
+  Calendar,
   Camera,
   CheckCircle2,
   Clock,
@@ -44,6 +47,7 @@ interface MemberPortalViewProps {
     borrowDate: string;
     dueDate: string;
     durationDays: number;
+    durationHours?: number;
     purposeNotes: string;
     borrowPhotoDataUrl: string;
   }) => void;
@@ -55,6 +59,28 @@ interface MemberPortalViewProps {
   }) => void;
   onCancelLoans: (loanIds: string[]) => void;
   onMarkEmailsRead: (userId: string) => void;
+}
+
+function toLocalDateStr(d: Date): string {
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+function toLocalTimeStr(d: Date): string {
+  const hh = String(d.getHours()).padStart(2, '0');
+  const min = String(d.getMinutes()).padStart(2, '0');
+  return `${hh}:${min}`;
+}
+
+function combineLocalDateAndTime(dateStr: string, timeStr: string): Date {
+  const safeTime = timeStr && /^\d{2}:\d{2}$/.test(timeStr) ? timeStr : '09:00';
+  const parsed = new Date(`${dateStr}T${safeTime}:00`);
+  if (Number.isNaN(parsed.getTime())) {
+    return new Date();
+  }
+  return parsed;
 }
 
 /**
@@ -126,22 +152,47 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
   onCancelLoans,
   onMarkEmailsRead,
 }) => {
-  // Borrow form state (Scan QR -> Adjust Quantity -> Confirm Loan)
+  // Borrow form state (Scan QR -> Adjust Quantity -> Date/Time + Duration -> Confirm Loan)
   const [scannedQrCode, setScannedQrCode] = useState('');
   const [quantity, setQuantity] = useState(1);
   const [borrowCart, setBorrowCart] = useState<
     Array<{ itemId: string; quantity: number }>
   >([]);
-  const [durationDays, setDurationDays] = useState(3);
+
+  const [borrowDateInput, setBorrowDateInput] = useState(() =>
+    toLocalDateStr(new Date())
+  );
+  const [borrowTimeInput, setBorrowTimeInput] = useState(() =>
+    toLocalTimeStr(new Date())
+  );
+  const [durationDays, setDurationDays] = useState(1);
+  const [durationHours, setDurationHours] = useState(0);
   const [dueDateInput, setDueDateInput] = useState(() => {
-    const dt = new Date(new Date(referenceTimeIso).getTime() + 3 * 86400 * 1000);
-    return dt.toISOString().slice(0, 10);
+    const dt = new Date(Date.now() + 24 * 3600 * 1000);
+    return toLocalDateStr(dt);
   });
+  const [dueTimeInput, setDueTimeInput] = useState(() => {
+    const dt = new Date(Date.now() + 24 * 3600 * 1000);
+    return toLocalTimeStr(dt);
+  });
+
   const [purposeNotes, setPurposeNotes] = useState('');
   const [borrowPhotoDataUrl, setBorrowPhotoDataUrl] = useState('');
   const [borrowError, setBorrowError] = useState<string | null>(null);
   const [borrowSuccess, setBorrowSuccess] = useState<string | null>(null);
   const [catalogFeedback, setCatalogFeedback] = useState<string | null>(null);
+
+  // Pop-up Modal state when Borrow or Return action succeeds
+  const [actionSuccessModal, setActionSuccessModal] = useState<{
+    type: 'borrow' | 'return';
+    title: string;
+    subtitle: string;
+    itemsList: Array<{ name: string; qrCode: string; quantity: number }>;
+    borrowDateLabel?: string;
+    dueDateLabel?: string;
+    durationLabel?: string;
+    returnDateLabel?: string;
+  } | null>(null);
 
   // QR Scanner Camera state
   const [cameraTarget, setCameraTarget] = useState<'borrow' | 'return' | null>(
@@ -169,11 +220,8 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
   const returnFileInputRef = useRef<HTMLInputElement | null>(null);
   const returnNativeCameraInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Active Loans multi-selection in My Loans & Return tabs
-  const [selectedMyLoanIds, setSelectedMyLoanIds] = useState<string[]>([]);
-
-  // Return form state (supports single or multi-loan return)
-  const [selectedReturnLoanIds, setSelectedReturnLoanIds] = useState<string[]>(
+  // Return form state (Wajib Scan QR / Barcode untuk verifikasi pengembalian)
+  const [verifiedReturnLoanIds, setVerifiedReturnLoanIds] = useState<string[]>(
     []
   );
   const [returnQrInput, setReturnQrInput] = useState<string>('');
@@ -278,28 +326,14 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
     setBorrowCart((prev) => prev.filter((e) => e.itemId !== itemId));
   };
 
-  // Active loans selected for return
+  // Active loans verified via QR/Barcode scan for return (NO manual checkbox fallback)
   const activeReturnLoansList = useMemo(() => {
-    if (selectedReturnLoanIds.length > 0) {
-      const found = myActiveLoans.filter((l) =>
-        selectedReturnLoanIds.includes(l.id)
-      );
-      if (found.length > 0) return found;
-    }
-    if (returnQrInput.trim()) {
-      const matched = myActiveLoans.filter(
-        (l) =>
-          l.itemQrCode.toLowerCase() === returnQrInput.trim().toLowerCase()
-      );
-      if (matched.length > 0) return matched;
-    }
-    return myActiveLoans.length > 0 ? [myActiveLoans[0]] : [];
-  }, [myActiveLoans, selectedReturnLoanIds, returnQrInput]);
+    return myActiveLoans.filter((l) => verifiedReturnLoanIds.includes(l.id));
+  }, [myActiveLoans, verifiedReturnLoanIds]);
 
   const handleCancelSingleLoan = (loan: LoanRecord) => {
     onCancelLoans([loan.id]);
-    setSelectedMyLoanIds((prev) => prev.filter((id) => id !== loan.id));
-    setSelectedReturnLoanIds((prev) => prev.filter((id) => id !== loan.id));
+    setVerifiedReturnLoanIds((prev) => prev.filter((id) => id !== loan.id));
     setCatalogFeedback(
       `Peminjaman "${loan.itemName}" (${loan.quantity} unit) berhasil dibatalkan/dihapus dan stok dikembalikan.`
     );
@@ -312,31 +346,57 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
     }, 4500);
   };
 
-  const handleCancelSelectedMyLoans = () => {
-    if (selectedMyLoanIds.length === 0) return;
-    const count = selectedMyLoanIds.length;
-    onCancelLoans(selectedMyLoanIds);
-    setSelectedMyLoanIds([]);
-    setCatalogFeedback(
-      `${count} peminjaman berhasil dibatalkan/dihapus dan stok telah dikembalikan ke inventaris.`
-    );
-    setTimeout(() => setCatalogFeedback(null), 4500);
-  };
-
-  const handleDurationChange = (days: number) => {
-    const safeDays = Math.max(1, Math.min(30, days));
+  // Synchronize due date & time when borrow start date/time or duration (days + hours) changes
+  const recalculateDueFromStartAndDuration = (
+    bDate: string,
+    bTime: string,
+    days: number,
+    hours: number
+  ) => {
+    let safeDays = Math.max(0, Math.min(30, Number.isFinite(days) ? days : 0));
+    let safeHours = Math.max(0, Math.min(23, Number.isFinite(hours) ? hours : 0));
+    if (safeDays === 0 && safeHours === 0) {
+      safeHours = 1;
+    }
     setDurationDays(safeDays);
-    const target = new Date(
-      new Date().getTime() + safeDays * 24 * 3600 * 1000
-    );
-    setDueDateInput(target.toISOString().slice(0, 10));
+    setDurationHours(safeHours);
+
+    const startDt = combineLocalDateAndTime(bDate, bTime);
+    const totalMs = (safeDays * 24 + safeHours) * 3600 * 1000;
+    const dueDt = new Date(startDt.getTime() + totalMs);
+    setDueDateInput(toLocalDateStr(dueDt));
+    setDueTimeInput(toLocalTimeStr(dueDt));
   };
 
-  const handleDueDateInputChange = (dateStr: string) => {
-    setDueDateInput(dateStr);
-    const diffMs = new Date(dateStr).getTime() - new Date().getTime();
-    const days = Math.max(1, Math.ceil(diffMs / (1000 * 3600 * 24)));
-    setDurationDays(days);
+  const handleBorrowStartChange = (newDate: string, newTime: string) => {
+    setBorrowDateInput(newDate);
+    setBorrowTimeInput(newTime);
+    recalculateDueFromStartAndDuration(
+      newDate,
+      newTime,
+      durationDays,
+      durationHours
+    );
+  };
+
+  const handleDurationDaysHoursChange = (newDays: number, newHours: number) => {
+    recalculateDueFromStartAndDuration(
+      borrowDateInput,
+      borrowTimeInput,
+      newDays,
+      newHours
+    );
+  };
+
+  const handleDueDateTimeChange = (newDueDate: string, newDueTime: string) => {
+    setDueDateInput(newDueDate);
+    setDueTimeInput(newDueTime);
+    const startDt = combineLocalDateAndTime(borrowDateInput, borrowTimeInput);
+    const endDt = combineLocalDateAndTime(newDueDate, newDueTime);
+    const diffMs = endDt.getTime() - startDt.getTime();
+    const totalHours = Math.max(1, Math.round(diffMs / (3600 * 1000)));
+    setDurationDays(Math.floor(totalHours / 24));
+    setDurationHours(totalHours % 24);
   };
 
   // Stop QR scanner camera
@@ -490,6 +550,38 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
     handleStopPhotoCamera();
   };
 
+  const handleVerifyReturnQrCode = useCallback(
+    (rawValue: string) => {
+      const code = rawValue.trim().toUpperCase();
+      if (!code) return;
+      setReturnError(null);
+      setReturnSuccess(null);
+
+      const matchingLoans = myActiveLoans.filter(
+        (l) => l.itemQrCode.toLowerCase() === code.toLowerCase()
+      );
+      if (matchingLoans.length === 0) {
+        setReturnError(
+          `Kode QR "${code}" tidak cocok dengan barang yang sedang Anda pinjam.`
+        );
+        return;
+      }
+
+      setVerifiedReturnLoanIds((prev) => {
+        const next = new Set(prev);
+        for (const ml of matchingLoans) {
+          next.add(ml.id);
+        }
+        return Array.from(next);
+      });
+      setReturnQrInput('');
+      setScanSuccessMsg(
+        `Terverifikasi Scan QR: "${matchingLoans[0].itemName}" (${code}) siap dikembalikan!`
+      );
+    },
+    [myActiveLoans]
+  );
+
   const applyDecodedQrResult = useCallback(
     (rawValue: string, target: 'borrow' | 'return') => {
       const code = rawValue.trim().toUpperCase();
@@ -523,21 +615,17 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
           );
         }
       } else {
-        setReturnQrInput(code);
-        const matchedLoan = myActiveLoans.find(
-          (l) => l.itemQrCode.toLowerCase() === code.toLowerCase()
-        );
-        if (matchedLoan) {
-          setSelectedReturnLoanIds((prev) =>
-            prev.includes(matchedLoan.id) ? prev : [...prev, matchedLoan.id]
-          );
-        }
-        setScanSuccessMsg(`Berhasil memindai Kode QR: ${code}`);
+        handleVerifyReturnQrCode(code);
       }
       setCameraStatusMsg(null);
       handleStopCameraScan();
     },
-    [handleStopCameraScan, myActiveLoans, items, handleAddToBorrowCart]
+    [
+      handleStopCameraScan,
+      items,
+      handleAddToBorrowCart,
+      handleVerifyReturnQrCode,
+    ]
   );
 
   const decodeQrFromCanvas = useCallback(
@@ -747,8 +835,17 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
     setBorrowError(null);
     setBorrowSuccess(null);
 
-    const nowIso = new Date().toISOString();
-    const dueIso = new Date(`${dueDateInput}T17:00:00.000Z`).toISOString();
+    const startDt = combineLocalDateAndTime(borrowDateInput, borrowTimeInput);
+    const dueDt = combineLocalDateAndTime(dueDateInput, dueTimeInput);
+    const borrowIso = startDt.toISOString();
+    const dueIso = dueDt.toISOString();
+
+    if (dueDt.getTime() <= startDt.getTime()) {
+      setBorrowError(
+        'Waktu selesai/jatuh tempo peminjaman harus setelah waktu mulai peminjaman.'
+      );
+      return;
+    }
 
     const entriesToBorrow: Array<{ item: InventoryItem; quantity: number }> =
       resolvedCartEntries.length > 0
@@ -768,7 +865,7 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
       const validation = validateBorrowRequest({
         item: entry.item,
         quantity: entry.quantity,
-        borrowDate: nowIso,
+        borrowDate: borrowIso,
         dueDate: dueIso,
         purposeNotes,
         borrowPhotoDataUrl,
@@ -787,9 +884,10 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
       item: entriesToBorrow[0].item,
       quantity: entriesToBorrow[0].quantity,
       entries: entriesToBorrow,
-      borrowDate: nowIso,
+      borrowDate: borrowIso,
       dueDate: dueIso,
       durationDays,
+      durationHours,
       purposeNotes: purposeNotes.trim(),
       borrowPhotoDataUrl,
     });
@@ -798,9 +896,33 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
       .map((e) => `${e.item.name} (${e.quantity} unit)`)
       .join(', ');
 
+    const durationText = formatLoanDuration({
+      durationDays,
+      durationHours,
+      borrowDate: borrowIso,
+      dueDate: dueIso,
+    });
+
     setBorrowSuccess(
       `Peminjaman ${entriesToBorrow.length} jenis barang [${summaryNames}] berhasil dikonfirmasi & bukti dikirim ke email Anda!`
     );
+
+    // Trigger Pop-Up Confirmation Modal
+    setActionSuccessModal({
+      type: 'borrow',
+      title: 'Peminjaman Barang Berhasil!',
+      subtitle:
+        'Data peminjaman telah tersimpan dan bukti konfirmasi telah dikirimkan ke email Anda.',
+      itemsList: entriesToBorrow.map((e) => ({
+        name: e.item.name,
+        qrCode: e.item.qrCode,
+        quantity: e.quantity,
+      })),
+      borrowDateLabel: formatLoanDateTime(borrowIso),
+      dueDateLabel: formatLoanDateTime(dueIso),
+      durationLabel: durationText,
+    });
+
     setBorrowCart([]);
     setScannedQrCode('');
     setPurposeNotes('');
@@ -836,7 +958,9 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
     setReturnSuccess(null);
 
     if (activeReturnLoansList.length === 0) {
-      setReturnError('Pilih atau scan QR barang yang sedang Anda pinjam.');
+      setReturnError(
+        'Wajib Scan Barcode / Kode QR barang yang ingin dikembalikan terlebih dahulu! Pengembalian tidak dapat dilakukan tanpa scan.'
+      );
       return;
     }
     if (!returnPhotoDataUrl) {
@@ -847,6 +971,12 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
     }
 
     const idsToReturn = activeReturnLoansList.map((l) => l.id);
+    const returnedSnapshot = activeReturnLoansList.map((l) => ({
+      name: l.itemName,
+      qrCode: l.itemQrCode,
+      quantity: l.quantity,
+    }));
+    const nowIso = new Date().toISOString();
 
     onReturnItem({
       loanId: idsToReturn[0],
@@ -857,22 +987,29 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
       returnPhotoDataUrl,
     });
 
-    const returnedNames = activeReturnLoansList
-      .map((l) => `${l.itemName} (${l.itemQrCode})`)
+    const returnedNames = returnedSnapshot
+      .map((l) => `${l.name} (${l.qrCode})`)
       .join(', ');
 
     setReturnSuccess(
-      `${activeReturnLoansList.length} pinjaman [${returnedNames}] telah berhasil dikembalikan ke inventaris.`
+      `${returnedSnapshot.length} pinjaman [${returnedNames}] telah berhasil dikembalikan dan stok inventaris otomatis bertambah!`
     );
+
+    // Trigger Pop-Up Confirmation Modal
+    setActionSuccessModal({
+      type: 'return',
+      title: 'Pengembalian Barang Berhasil!',
+      subtitle:
+        'Barang telah tercatat dikembalikan dan stok tersedia di inventaris telah otomatis bertambah.',
+      itemsList: returnedSnapshot,
+      returnDateLabel: formatLoanDateTime(nowIso),
+    });
+
     setReturnNotes('');
     setReturnPhotoDataUrl('');
     setReturnQrInput('');
-    setSelectedReturnLoanIds([]);
+    setVerifiedReturnLoanIds([]);
   };
-
-  const allMyActiveSelected =
-    myActiveLoans.length > 0 &&
-    myActiveLoans.every((l) => selectedMyLoanIds.includes(l.id));
 
   return (
     <div className="space-y-8">
@@ -918,7 +1055,7 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
         </section>
       )}
 
-      {/* TAB 1: MY ACTIVE LOANS (TANPA LIST SELURUH BARANG) */}
+      {/* TAB 1: MY ACTIVE LOANS (TANPA LIST SELURUH BARANG & TANPA CHECKLIST MANUAL) */}
       {activeTab === 'catalog' && (
         <div className="space-y-6">
           {catalogFeedback && (
@@ -939,32 +1076,23 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
                   Barang yang Kamu Pinjam ({myActiveLoans.length})
                 </h2>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  Untuk meminjam barang baru, gunakan tombol <strong>Scan QR untuk Pinjam Barang</strong>
+                  Pengembalian barang wajib melalui <strong>Scan Barcode / Kode QR</strong> pada tab Pengembalian
                 </p>
               </div>
               <div className="flex flex-wrap items-center gap-2">
-                {selectedMyLoanIds.length > 0 && (
-                  <>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setSelectedReturnLoanIds(selectedMyLoanIds);
-                        onChangeTab('return');
-                      }}
-                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg shadow-xs"
-                    >
-                      <RotateCcw className="w-3.5 h-3.5" />
-                      Kembalikan Terpilih ({selectedMyLoanIds.length})
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleCancelSelectedMyLoans}
-                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-red-600 hover:bg-red-700 rounded-lg shadow-xs"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                      Batal Pinjam Terpilih ({selectedMyLoanIds.length})
-                    </button>
-                  </>
+                {myActiveLoans.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setScanSuccessMsg(null);
+                      setReturnError(null);
+                      onChangeTab('return');
+                    }}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg shadow-xs"
+                  >
+                    <ScanLine className="w-3.5 h-3.5" />
+                    Scan QR untuk Kembalikan Barang
+                  </button>
                 )}
                 <button
                   type="button"
@@ -981,26 +1109,12 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
               <table className="w-full text-left border-collapse">
                 <thead>
                   <tr className="border-b border-slate-200 bg-slate-50/70 text-xs font-medium text-slate-500">
-                    <th className="py-3 px-4 w-10">
-                      <input
-                        type="checkbox"
-                        checked={allMyActiveSelected}
-                        onChange={() => {
-                          if (allMyActiveSelected) {
-                            setSelectedMyLoanIds([]);
-                          } else {
-                            setSelectedMyLoanIds(myActiveLoans.map((l) => l.id));
-                          }
-                        }}
-                        aria-label="Pilih semua pinjaman aktif saya"
-                        className="rounded border-slate-300"
-                      />
-                    </th>
                     <th className="py-3 px-4">Kode & Nama Barang</th>
-                    <th className="py-3 px-4">Tanggal Pinjam · Jatuh Tempo</th>
+                    <th className="py-3 px-4">Rentang Waktu Pinjam (Tanggal & Jam)</th>
+                    <th className="py-3 px-4">Durasi</th>
                     <th className="py-3 px-4">Catatan Pemakaian</th>
                     <th className="py-3 px-4">Status Waktu</th>
-                    <th className="py-3 px-4 text-right">Kembalikan / Batal Pinjam</th>
+                    <th className="py-3 px-4 text-right">Aksi</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-200 text-xs">
@@ -1023,29 +1137,11 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
                   ) : (
                     myActiveLoans.map((loan) => {
                       const due = calculateDueState(loan, referenceTimeIso, 24);
-                      const isChecked = selectedMyLoanIds.includes(loan.id);
                       return (
                         <tr
                           key={loan.id}
-                          className={`hover:bg-slate-50/80 ${
-                            isChecked ? 'bg-sky-50/50' : ''
-                          }`}
+                          className="hover:bg-slate-50/80"
                         >
-                          <td className="py-3 px-4">
-                            <input
-                              type="checkbox"
-                              checked={isChecked}
-                              onChange={() =>
-                                setSelectedMyLoanIds((prev) =>
-                                  prev.includes(loan.id)
-                                    ? prev.filter((id) => id !== loan.id)
-                                    : [...prev, loan.id]
-                                )
-                              }
-                              aria-label={`Pilih pinjaman ${loan.itemName}`}
-                              className="rounded border-slate-300"
-                            />
-                          </td>
                           <td className="py-3 px-4">
                             <p className="font-semibold text-slate-900">
                               {loan.itemName}
@@ -1055,11 +1151,19 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
                             </p>
                           </td>
                           <td className="py-3 px-4 font-mono tabular-nums text-slate-600 whitespace-nowrap">
-                            {new Date(loan.borrowDate).toLocaleDateString('id-ID')}{' '}
-                            &rarr;{' '}
-                            <strong className="text-slate-900">
-                              {new Date(loan.dueDate).toLocaleDateString('id-ID')}
-                            </strong>
+                            <div>
+                              <span className="text-[11px] text-slate-400">Dari: </span>
+                              {formatLoanDateTime(loan.borrowDate)}
+                            </div>
+                            <div className="mt-0.5">
+                              <span className="text-[11px] text-slate-400">Sampai: </span>
+                              <strong className="text-slate-900">
+                                {formatLoanDateTime(loan.dueDate)}
+                              </strong>
+                            </div>
+                          </td>
+                          <td className="py-3 px-4 whitespace-nowrap font-medium text-slate-700">
+                            {formatLoanDuration(loan)}
                           </td>
                           <td className="py-3 px-4 text-slate-700 max-w-xs">
                             {loan.purposeNotes}
@@ -1087,14 +1191,14 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
                               <button
                                 type="button"
                                 onClick={() => {
-                                  setSelectedReturnLoanIds([loan.id]);
-                                  setReturnQrInput(loan.itemQrCode);
+                                  setReturnError(null);
+                                  setScanSuccessMsg(null);
                                   onChangeTab('return');
                                 }}
-                                className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-white bg-[#e71f69] hover:bg-[#cf165b] rounded-md transition-colors shadow-xs"
+                                className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-white bg-[#0d113a] hover:bg-[#151c54] rounded-md transition-colors shadow-xs"
                               >
-                                <RotateCcw className="w-3.5 h-3.5" />
-                                Kembalikan
+                                <ScanLine className="w-3.5 h-3.5 text-[#e71f69]" />
+                                Scan QR Kembalikan
                               </button>
                               <button
                                 type="button"
@@ -1417,45 +1521,162 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
               </div>
             </div>
 
-            {/* Right Column: Duration, Notes, Real Camera / Photo Upload, and Confirm Loan */}
+            {/* Right Column: Rentang Tanggal + Jam & Durasi (Hari + Jam), Notes, Photo Proof, and Confirm Loan */}
             <div className="lg:col-span-6 space-y-5">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <label
-                    htmlFor="borrow-duration-input"
-                    className="block text-xs font-medium text-slate-700 mb-1"
-                  >
-                    Durasi Pinjam (Hari) *
-                  </label>
-                  <input
-                    id="borrow-duration-input"
-                    type="number"
-                    min={1}
-                    max={30}
-                    value={durationDays}
-                    onChange={(e) =>
-                      handleDurationChange(
-                        Number.parseInt(e.target.value, 10) || 1
-                      )
-                    }
-                    className="w-full px-3 py-2 text-xs font-mono bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-[#0d113a]"
-                  />
+              {/* Step 3: Rentang Waktu Peminjaman (Dari Tanggal & Jam s/d Tanggal & Jam + Durasi Hari & Jam) */}
+              <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-xs font-semibold text-slate-900 flex items-center gap-1.5">
+                    <Calendar className="w-3.5 h-3.5 text-[#e71f69]" />
+                    Rentang Waktu & Durasi Peminjaman (Hari & Jam) *
+                  </span>
+                  <span className="px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-[#0d113a] text-white">
+                    Durasi:{' '}
+                    {durationDays > 0 && durationHours > 0
+                      ? `${durationDays} hari ${durationHours} jam`
+                      : durationDays > 0
+                        ? `${durationDays} hari`
+                        : `${Math.max(1, durationHours)} jam`}
+                  </span>
                 </div>
 
-                <div>
-                  <label
-                    htmlFor="borrow-duedate-input"
-                    className="block text-xs font-medium text-slate-700 mb-1"
-                  >
-                    Tanggal Pengembalian *
-                  </label>
-                  <input
-                    id="borrow-duedate-input"
-                    type="date"
-                    value={dueDateInput}
-                    onChange={(e) => handleDueDateInputChange(e.target.value)}
-                    className="w-full px-3 py-2 text-xs font-mono bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-[#0d113a]"
-                  />
+                {/* Quick Presets (Jam & Hari) */}
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="text-[11px] text-slate-500 mr-1">
+                    Pilih Cepat:
+                  </span>
+                  {[
+                    { label: '2 Jam', d: 0, h: 2 },
+                    { label: '4 Jam', d: 0, h: 4 },
+                    { label: '8 Jam', d: 0, h: 8 },
+                    { label: '12 Jam', d: 0, h: 12 },
+                    { label: '1 Hari', d: 1, h: 0 },
+                    { label: '3 Hari', d: 3, h: 0 },
+                    { label: '7 Hari', d: 7, h: 0 },
+                  ].map((preset) => {
+                    const isActive =
+                      durationDays === preset.d && durationHours === preset.h;
+                    return (
+                      <button
+                        key={preset.label}
+                        type="button"
+                        onClick={() =>
+                          handleDurationDaysHoursChange(preset.d, preset.h)
+                        }
+                        className={`px-2.5 py-1 text-[11px] font-semibold rounded-md border transition-colors ${
+                          isActive
+                            ? 'bg-[#e71f69] text-white border-[#e71f69]'
+                            : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-100'
+                        }`}
+                      >
+                        {preset.label}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* Durasi Hari & Durasi Jam */}
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label
+                      htmlFor="borrow-duration-days"
+                      className="block text-[11px] font-medium text-slate-700 mb-1"
+                    >
+                      Durasi (Hari)
+                    </label>
+                    <input
+                      id="borrow-duration-days"
+                      type="number"
+                      min={0}
+                      max={30}
+                      value={durationDays}
+                      onChange={(e) =>
+                        handleDurationDaysHoursChange(
+                          Math.max(0, Number.parseInt(e.target.value, 10) || 0),
+                          durationHours
+                        )
+                      }
+                      className="w-full px-3 py-2 text-xs font-mono bg-white border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-[#0d113a]"
+                    />
+                  </div>
+                  <div>
+                    <label
+                      htmlFor="borrow-duration-hours"
+                      className="block text-[11px] font-medium text-slate-700 mb-1"
+                    >
+                      Durasi Tambahan (Jam)
+                    </label>
+                    <input
+                      id="borrow-duration-hours"
+                      type="number"
+                      min={0}
+                      max={23}
+                      value={durationHours}
+                      onChange={(e) =>
+                        handleDurationDaysHoursChange(
+                          durationDays,
+                          Math.max(0, Number.parseInt(e.target.value, 10) || 0)
+                        )
+                      }
+                      className="w-full px-3 py-2 text-xs font-mono bg-white border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-[#0d113a]"
+                    />
+                  </div>
+                </div>
+
+                {/* Dari Tanggal & Jam -> Sampai Tanggal & Jam */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                  <div className="p-2.5 bg-white border border-slate-200 rounded-lg space-y-2">
+                    <span className="block text-[11px] font-semibold text-slate-700">
+                      Dari Tanggal & Jam (Mulai Pinjam) *
+                    </span>
+                    <div className="grid grid-cols-2 gap-1.5">
+                      <input
+                        aria-label="Tanggal mulai pinjam"
+                        type="date"
+                        value={borrowDateInput}
+                        onChange={(e) =>
+                          handleBorrowStartChange(e.target.value, borrowTimeInput)
+                        }
+                        className="w-full px-2 py-1.5 text-xs font-mono bg-slate-50 border border-slate-200 rounded text-slate-900 focus:outline-none focus:border-[#0d113a]"
+                      />
+                      <input
+                        aria-label="Jam mulai pinjam"
+                        type="time"
+                        value={borrowTimeInput}
+                        onChange={(e) =>
+                          handleBorrowStartChange(borrowDateInput, e.target.value)
+                        }
+                        className="w-full px-2 py-1.5 text-xs font-mono bg-slate-50 border border-slate-200 rounded text-slate-900 focus:outline-none focus:border-[#0d113a]"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="p-2.5 bg-white border border-slate-200 rounded-lg space-y-2">
+                    <span className="block text-[11px] font-semibold text-slate-700">
+                      Sampai Tanggal & Jam (Pengembalian) *
+                    </span>
+                    <div className="grid grid-cols-2 gap-1.5">
+                      <input
+                        id="borrow-duedate-input"
+                        aria-label="Tanggal selesai pinjam"
+                        type="date"
+                        value={dueDateInput}
+                        onChange={(e) =>
+                          handleDueDateTimeChange(e.target.value, dueTimeInput)
+                        }
+                        className="w-full px-2 py-1.5 text-xs font-mono bg-slate-50 border border-slate-200 rounded text-slate-900 focus:outline-none focus:border-[#0d113a]"
+                      />
+                      <input
+                        aria-label="Jam selesai pinjam"
+                        type="time"
+                        value={dueTimeInput}
+                        onChange={(e) =>
+                          handleDueDateTimeChange(dueDateInput, e.target.value)
+                        }
+                        className="w-full px-2 py-1.5 text-xs font-mono bg-slate-50 border border-slate-200 rounded text-slate-900 focus:outline-none focus:border-[#0d113a]"
+                      />
+                    </div>
+                  </div>
                 </div>
               </div>
 
@@ -1639,21 +1860,26 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
         </section>
       )}
 
-      {/* TAB 3: RETURN ITEM (SUPPORTS MULTI-RETURN, LIVE CAMERA PHOTO & UPLOAD) */}
+      {/* TAB 3: RETURN ITEM (WAJIB SCAN BARCODE / QR, TANPA CHECKLIST MANUAL) */}
       {activeTab === 'return' && (
         <section
-          aria-label="Formulir Pengembalian Barang"
+          aria-label="Formulir Pengembalian Barang Wajib Scan QR"
           className="bg-white border border-slate-200 rounded-lg p-6"
         >
           <div className="pb-4 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2">
             <div>
               <h2 className="text-base font-semibold text-slate-900">
-                Pengembalian atau Pembatalan Barang Pinjaman
+                Pengembalian Barang Pinjaman (Wajib Scan Barcode / QR)
               </h2>
               <p className="text-xs text-slate-500 mt-0.5">
-                Centang atau Scan QR barang yang dikembalikan, ambil/unggah foto bukti pengembalian, lalu selesaikan pengembalian
+                Pengembalian wajib memindai <strong>Barcode / Kode QR</strong> pada fisik barang terlebih dahulu, melampirkan foto bukti pengembalian, lalu menekan tombol Konfirmasi Pengembalian.
               </p>
             </div>
+            {activeReturnLoansList.length > 0 && (
+              <span className="px-3 py-1 text-xs font-semibold rounded-full bg-emerald-600 text-white">
+                {activeReturnLoansList.length} Pinjaman Terverifikasi Scan QR ✓
+              </span>
+            )}
           </div>
 
           {returnSuccess && (
@@ -1669,6 +1895,9 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
               <p className="text-sm font-semibold text-slate-900">
                 Tidak Ada Barang yang Perlu Dikembalikan
               </p>
+              <p className="text-xs text-slate-500">
+                Seluruh pinjaman Anda telah dikembalikan ke inventaris.
+              </p>
             </div>
           ) : (
             <form
@@ -1676,97 +1905,19 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
               className="mt-6 grid grid-cols-1 lg:grid-cols-12 gap-8"
             >
               <div className="lg:col-span-5 space-y-4">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs font-semibold text-slate-800">
-                    1. Pilih Barang yang Dikembalikan ({activeReturnLoansList.length} Dipilih)
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (selectedReturnLoanIds.length === myActiveLoans.length) {
-                        setSelectedReturnLoanIds([]);
-                      } else {
-                        setSelectedReturnLoanIds(myActiveLoans.map((l) => l.id));
-                      }
-                    }}
-                    className="text-xs font-medium text-sky-700 hover:underline"
-                  >
-                    {selectedReturnLoanIds.length === myActiveLoans.length
-                      ? 'Batal Pilih Semua'
-                      : 'Pilih Semua Pinjaman'}
-                  </button>
-                </div>
-
-                <div className="divide-y divide-slate-200 border border-slate-200 rounded-lg overflow-hidden max-h-64 overflow-y-auto">
-                  {myActiveLoans.map((l) => {
-                    const isSelected = activeReturnLoansList.some(
-                      (item) => item.id === l.id
-                    );
-                    return (
-                      <div
-                        key={l.id}
-                        onClick={() =>
-                          setSelectedReturnLoanIds((prev) =>
-                            prev.includes(l.id)
-                              ? prev.filter((id) => id !== l.id)
-                              : [...prev, l.id]
-                          )
-                        }
-                        className={`p-3 flex items-center justify-between gap-2 cursor-pointer text-xs ${
-                          isSelected ? 'bg-sky-50/70' : 'bg-white hover:bg-slate-50'
-                        }`}
-                      >
-                        <div className="flex items-center gap-2.5 min-w-0">
-                          <input
-                            type="checkbox"
-                            checked={isSelected}
-                            onChange={() => {}}
-                            className="rounded border-slate-300 pointer-events-none"
-                          />
-                          <div className="min-w-0">
-                            <p className="font-semibold text-slate-900 truncate">
-                              {l.itemName} ({l.quantity} unit)
-                            </p>
-                            <p className="font-mono text-[11px] text-slate-500">
-                              {l.itemQrCode} · Batas:{' '}
-                              {new Date(l.dueDate).toLocaleDateString('id-ID')}
-                            </p>
-                          </div>
-                        </div>
-
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleCancelSingleLoan(l);
-                          }}
-                          title="Batal pinjam / hapus pinjaman ini"
-                          className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-red-600 bg-red-50 hover:bg-red-100 rounded shrink-0"
-                        >
-                          <Trash2 className="w-3 h-3" />
-                          Batal Pinjam
-                        </button>
-                      </div>
-                    );
-                  })}
-                </div>
-
-                <div>
+                {/* Step 1: Mandatory QR / Barcode Scanner for Return */}
+                <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl space-y-3">
                   <label
                     htmlFor="return-qr-verify"
-                    className="block text-xs font-medium text-slate-700 mb-1"
+                    className="block text-xs font-semibold text-slate-900"
                   >
-                    Atau Scan Kode QR Barang yang Dikembalikan
+                    1. Scan Barcode / Kode QR Barang yang Dikembalikan *
                   </label>
+                  <p className="text-[11px] text-slate-600">
+                    Arahkan kamera atau alat scanner ke Barcode / Kode QR pada barang untuk memverifikasi barang yang dikembalikan.
+                  </p>
+
                   <div className="flex flex-wrap gap-2">
-                    <input
-                      id="return-qr-verify"
-                      type="text"
-                      value={returnQrInput}
-                      onChange={(e) => setReturnQrInput(e.target.value)}
-                      placeholder="Scan Kode QR..."
-                      className="flex-1 min-w-[150px] px-3 py-2 text-xs font-mono bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-[#0d113a]"
-                    />
                     <button
                       type="button"
                       onClick={() =>
@@ -1774,14 +1925,16 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
                           ? handleStopCameraScan()
                           : handleStartCameraScan('return')
                       }
-                      className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-white bg-[#0d113a] hover:bg-[#151c54] rounded-lg transition-colors whitespace-nowrap shrink-0 shadow-xs"
+                      className="inline-flex items-center gap-1.5 px-4 py-2.5 text-xs font-semibold text-white bg-[#0d113a] hover:bg-[#151c54] rounded-lg transition-colors whitespace-nowrap shrink-0 shadow-xs"
                     >
-                      <ScanLine className="w-3.5 h-3.5 text-[#e71f69]" />
-                      {cameraTarget === 'return' ? 'Tutup Kamera' : 'Kamera QR'}
+                      <ScanLine className="w-4 h-4 text-[#e71f69]" />
+                      {cameraTarget === 'return'
+                        ? 'Tutup Kamera QR'
+                        : 'Buka Kamera Scan QR'}
                     </button>
-                    <label className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-slate-800 bg-slate-100 hover:bg-slate-200 rounded-lg cursor-pointer transition-colors whitespace-nowrap shrink-0">
-                      <Camera className="w-3.5 h-3.5 text-[#e71f69]" />
-                      Foto QR
+                    <label className="inline-flex items-center gap-1.5 px-3.5 py-2.5 text-xs font-medium text-slate-800 bg-white hover:bg-slate-100 border border-slate-200 rounded-lg cursor-pointer transition-colors whitespace-nowrap shrink-0">
+                      <Camera className="w-4 h-4 text-[#e71f69]" />
+                      Scan dari Foto QR
                       <input
                         type="file"
                         accept="image/*"
@@ -1791,27 +1944,149 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
                       />
                     </label>
                   </div>
+
+                  <div className="flex gap-2 pt-1">
+                    <input
+                      id="return-qr-verify"
+                      type="text"
+                      value={returnQrInput}
+                      onChange={(e) => setReturnQrInput(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && returnQrInput.trim()) {
+                          e.preventDefault();
+                          handleVerifyReturnQrCode(returnQrInput);
+                        }
+                      }}
+                      placeholder="Gunakan alat Barcode Scanner di sini..."
+                      className="flex-1 min-w-[150px] px-3 py-2 text-xs font-mono bg-white border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-[#0d113a]"
+                    />
+                    {returnQrInput.trim() && (
+                      <button
+                        type="button"
+                        onClick={() => handleVerifyReturnQrCode(returnQrInput)}
+                        className="inline-flex items-center gap-1 px-3.5 py-2 text-xs font-semibold text-white bg-[#e71f69] hover:bg-[#cf165b] rounded-lg shrink-0"
+                      >
+                        <ScanLine className="w-3.5 h-3.5" />
+                        Verifikasi QR
+                      </button>
+                    )}
+                  </div>
+
+                  {cameraTarget === 'return' && (
+                    <div className="p-3 bg-slate-900 rounded-lg text-center space-y-2 relative overflow-hidden">
+                      <div className="relative rounded overflow-hidden border border-slate-700 bg-black">
+                        <video
+                          ref={videoRef}
+                          autoPlay
+                          playsInline
+                          muted
+                          className="w-full h-56 object-cover"
+                        />
+                        <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+                          <div className="w-40 h-40 border-2 border-[#e71f69] rounded-lg shadow-[0_0_0_9999px_rgba(0,0,0,0.35)]" />
+                        </div>
+                      </div>
+                      <p className="text-xs text-slate-200">
+                        Arahkan kamera ke Kode QR / Barcode barang yang dikembalikan...
+                      </p>
+                    </div>
+                  )}
+
+                  {scanSuccessMsg && (
+                    <div className="p-2.5 bg-emerald-50 border border-emerald-200 rounded-lg text-xs font-medium text-emerald-700 flex items-center gap-2">
+                      <CheckCircle2 className="w-4 h-4 shrink-0" />
+                      <span>{scanSuccessMsg}</span>
+                    </div>
+                  )}
+
+                  {cameraStatusMsg && (
+                    <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-2.5">
+                      {cameraStatusMsg}
+                    </p>
+                  )}
                 </div>
 
-                {cameraTarget === 'return' && (
-                  <div className="p-3 bg-slate-900 rounded-lg text-center space-y-2 relative overflow-hidden">
-                    <div className="relative rounded overflow-hidden border border-slate-700 bg-black">
-                      <video
-                        ref={videoRef}
-                        autoPlay
-                        playsInline
-                        muted
-                        className="w-full h-56 object-cover"
-                      />
-                      <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-                        <div className="w-40 h-40 border-2 border-[#e71f69] rounded-lg shadow-[0_0_0_9999px_rgba(0,0,0,0.35)]" />
-                      </div>
-                    </div>
-                    <p className="text-xs text-slate-200">
-                      Arahkan kamera ke Kode QR barang yang dikembalikan...
-                    </p>
+                {/* Step 2: Status Verifikasi Scan Barang Pinjaman (Read-Only tanpa Checkbox manual) */}
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-semibold text-slate-800">
+                      2. Daftar Pinjaman Anda ({activeReturnLoansList.length}/{myActiveLoans.length} Terverifikasi Scan)
+                    </span>
+                    {verifiedReturnLoanIds.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setVerifiedReturnLoanIds([])}
+                        className="text-[11px] font-medium text-slate-500 hover:text-red-600"
+                      >
+                        Reset Scan
+                      </button>
+                    )}
                   </div>
-                )}
+
+                  <div className="divide-y divide-slate-200 border border-slate-200 rounded-xl overflow-hidden max-h-72 overflow-y-auto bg-white">
+                    {myActiveLoans.map((l) => {
+                      const isVerified = verifiedReturnLoanIds.includes(l.id);
+                      return (
+                        <div
+                          key={l.id}
+                          className={`p-3.5 flex items-center justify-between gap-2 text-xs transition-colors ${
+                            isVerified ? 'bg-emerald-50/70' : 'bg-white'
+                          }`}
+                        >
+                          <div className="min-w-0 flex-1 space-y-1">
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              {isVerified ? (
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-600 text-white">
+                                  <CheckCircle2 className="w-3 h-3" />
+                                  Terverifikasi Scan QR
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-amber-100 text-amber-800">
+                                  <ScanLine className="w-3 h-3" />
+                                  Belum Di-Scan (Wajib Scan QR)
+                                </span>
+                              )}
+                              <span className="font-mono text-[11px] text-slate-500">
+                                {l.itemQrCode}
+                              </span>
+                            </div>
+                            <p className="font-semibold text-slate-900 truncate">
+                              {l.itemName} ({l.quantity} unit)
+                            </p>
+                            <p className="text-[11px] text-slate-500 font-mono">
+                              Batas: {formatLoanDateTime(l.dueDate)} ({formatLoanDuration(l)})
+                            </p>
+                          </div>
+
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            {isVerified && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setVerifiedReturnLoanIds((prev) =>
+                                    prev.filter((id) => id !== l.id)
+                                  )
+                                }
+                                className="px-2 py-1 text-[11px] font-medium text-slate-600 bg-white border border-slate-200 hover:bg-slate-100 rounded"
+                              >
+                                Batal Scan
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => handleCancelSingleLoan(l)}
+                              title="Batal pinjam / hapus pinjaman ini"
+                              className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-red-600 bg-red-50 hover:bg-red-100 rounded shrink-0"
+                            >
+                              <Trash2 className="w-3 h-3" />
+                              Batal Pinjam
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
               </div>
 
               <div className="lg:col-span-7 space-y-5">
@@ -1836,7 +2111,7 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
                 <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl space-y-3">
                   <div className="flex items-center justify-between">
                     <span className="block text-xs font-semibold text-slate-800">
-                      Bukti Foto Barang Saat Dikembalikan *
+                      3. Bukti Foto Barang Saat Dikembalikan *
                     </span>
                     {returnPhotoDataUrl && (
                       <button
@@ -1968,10 +2243,13 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
                 <div className="pt-2 flex flex-wrap items-center gap-3">
                   <button
                     type="submit"
-                    className="inline-flex items-center gap-2 px-5 py-2.5 text-xs font-semibold text-white bg-[#0d113a] hover:bg-[#151c54] rounded-lg transition-colors shadow-xs"
+                    disabled={activeReturnLoansList.length === 0}
+                    className="inline-flex items-center gap-2 px-5 py-3 text-xs font-semibold text-white bg-[#0d113a] hover:bg-[#151c54] disabled:bg-slate-300 disabled:text-slate-500 disabled:cursor-not-allowed rounded-lg transition-colors shadow-xs"
                   >
-                    <RotateCcw className="w-4 h-4" />
-                    Selesaikan Pengembalian ({activeReturnLoansList.length} Barang)
+                    <RotateCcw className="w-4 h-4 text-[#e71f69]" />
+                    {activeReturnLoansList.length === 0
+                      ? 'Scan QR Barang Terlebih Dahulu untuk Mengembalikan'
+                      : `Konfirmasi Pengembalian (${activeReturnLoansList.length} Barang Terverifikasi)`}
                   </button>
                 </div>
               </div>
@@ -2032,6 +2310,118 @@ export const MemberPortalView: React.FC<MemberPortalViewProps> = ({
             )}
           </div>
         </section>
+      )}
+
+      {/* POP-UP MODAL KONFIRMASI BERHASIL PINJAM ATAU BERHASIL KEMBALIKAN */}
+      {actionSuccessModal && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="action-success-modal-title"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4"
+        >
+          <div className="bg-white border border-slate-200 rounded-2xl max-w-md w-full p-6 shadow-2xl space-y-5 animate-in fade-in zoom-in-95 duration-200">
+            <div className="flex flex-col items-center text-center space-y-2.5">
+              <div
+                className={`w-14 h-14 rounded-full flex items-center justify-center ${
+                  actionSuccessModal.type === 'borrow'
+                    ? 'bg-emerald-100 text-emerald-600'
+                    : 'bg-sky-100 text-sky-600'
+                }`}
+              >
+                <CheckCircle2 className="w-8 h-8" />
+              </div>
+              <h3
+                id="action-success-modal-title"
+                className="text-base font-bold text-slate-900"
+              >
+                {actionSuccessModal.title}
+              </h3>
+              <p className="text-xs text-slate-600 leading-relaxed">
+                {actionSuccessModal.subtitle}
+              </p>
+            </div>
+
+            <div className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 space-y-2.5 text-xs">
+              <div className="font-semibold text-slate-800 border-b border-slate-200 pb-1.5">
+                Daftar Barang ({actionSuccessModal.itemsList.length} Jenis):
+              </div>
+              <ul className="space-y-1.5 max-h-40 overflow-y-auto">
+                {actionSuccessModal.itemsList.map((it, idx) => (
+                  <li
+                    key={`${it.qrCode}-${idx}`}
+                    className="flex items-center justify-between gap-2 text-slate-700"
+                  >
+                    <span className="font-medium text-slate-900 truncate">
+                      {it.name}{' '}
+                      <span className="font-mono text-[11px] text-slate-500">
+                        ({it.qrCode})
+                      </span>
+                    </span>
+                    <span className="font-mono font-semibold text-[#0d113a] shrink-0">
+                      {it.quantity} unit
+                    </span>
+                  </li>
+                ))}
+              </ul>
+
+              {actionSuccessModal.type === 'borrow' && (
+                <div className="pt-2 border-t border-slate-200 space-y-1 text-[11px] text-slate-600 font-mono">
+                  <div className="flex justify-between gap-2">
+                    <span className="text-slate-500">Waktu Pinjam:</span>
+                    <strong className="text-slate-900">
+                      {actionSuccessModal.borrowDateLabel}
+                    </strong>
+                  </div>
+                  <div className="flex justify-between gap-2">
+                    <span className="text-slate-500">Batas Kembali:</span>
+                    <strong className="text-[#e71f69]">
+                      {actionSuccessModal.dueDateLabel}
+                    </strong>
+                  </div>
+                  <div className="flex justify-between gap-2">
+                    <span className="text-slate-500">Total Durasi:</span>
+                    <strong className="text-slate-900">
+                      {actionSuccessModal.durationLabel}
+                    </strong>
+                  </div>
+                </div>
+              )}
+
+              {actionSuccessModal.type === 'return' &&
+                actionSuccessModal.returnDateLabel && (
+                  <div className="pt-2 border-t border-slate-200 flex justify-between gap-2 text-[11px] text-slate-600 font-mono">
+                    <span className="text-slate-500">Waktu Dikembalikan:</span>
+                    <strong className="text-emerald-700">
+                      {actionSuccessModal.returnDateLabel}
+                    </strong>
+                  </div>
+                )}
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-1">
+              {actionSuccessModal.type === 'borrow' && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActionSuccessModal(null);
+                    onChangeTab('catalog');
+                  }}
+                  className="px-4 py-2.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors"
+                >
+                  Lihat Pinjaman Saya
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => setActionSuccessModal(null)}
+                className="flex-1 sm:flex-initial px-5 py-2.5 text-xs font-semibold text-white bg-[#0d113a] hover:bg-[#151c54] rounded-lg transition-colors shadow-xs"
+              >
+                OK, Mengerti
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

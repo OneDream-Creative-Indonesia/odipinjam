@@ -56,6 +56,7 @@ export interface LoanRecord {
   dueDate: string; // ISO string
   returnDate?: string; // ISO string
   durationDays: number;
+  durationHours?: number;
   purposeNotes: string;
   returnNotes?: string;
   borrowPhotoDataUrl: string;

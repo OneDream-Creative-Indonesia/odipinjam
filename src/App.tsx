@@ -19,6 +19,9 @@ import {
   authenticateUser,
   buildAutomatedEmailNotifications,
   calculateDueState,
+  formatLoanDateTime,
+  formatLoanDuration,
+  reconcileItemsAvailableStock,
   sanitizeInventoryItem,
 } from './utils/inventoryLogic';
 import { AdminDashboardView } from './components/AdminDashboardView';
@@ -157,6 +160,9 @@ export default function App() {
     useState<InventoryItem | null>(null);
 
   const latestStateRef = useRef({ users, items, loans, emails });
+  const inFlightMutationsRef = useRef(0);
+  const lastMutationTimeRef = useRef(0);
+
   useEffect(() => {
     latestStateRef.current = { users, items, loans, emails };
   }, [users, items, loans, emails]);
@@ -168,13 +174,20 @@ export default function App() {
       loans?: LoanRecord[];
       emails?: EmailNotification[];
     }) => {
+      const nextLoans = partial.loans ?? latestStateRef.current.loans;
+      const rawItems = partial.items ?? latestStateRef.current.items;
+      const reconciledItems = reconcileItemsAvailableStock(rawItems, nextLoans);
+
       const payload = {
         users: partial.users ?? latestStateRef.current.users,
-        items: partial.items ?? latestStateRef.current.items,
-        loans: partial.loans ?? latestStateRef.current.loans,
+        items: reconciledItems,
+        loans: nextLoans,
         emails: partial.emails ?? latestStateRef.current.emails,
       };
       latestStateRef.current = payload;
+      lastMutationTimeRef.current = Date.now();
+      inFlightMutationsRef.current += 1;
+
       try {
         await fetch('/api/state', {
           method: 'POST',
@@ -183,74 +196,113 @@ export default function App() {
         });
       } catch {
         // Fallback to localStorage when running without backend API
+      } finally {
+        inFlightMutationsRef.current = Math.max(
+          0,
+          inFlightMutationsRef.current - 1
+        );
+        lastMutationTimeRef.current = Date.now();
       }
     },
     []
   );
 
-  const pullStateFromServer = useCallback(async () => {
-    try {
-      const res = await fetch('/api/state', { cache: 'no-store' });
-      if (!res.ok) return null;
-      const data = await res.json();
-      const serverUsers: User[] = Array.isArray(data.users) ? data.users : [];
-      const serverItems: InventoryItem[] = Array.isArray(data.items)
-        ? data.items.map((it: InventoryItem, idx: number) =>
-            sanitizeInventoryItem(it, idx)
-          )
-        : [];
-      const serverLoans: LoanRecord[] = Array.isArray(data.loans)
-        ? data.loans
-        : [];
-      const serverEmails: EmailNotification[] = Array.isArray(data.emails)
-        ? data.emails
-        : [];
-
-      const serverIsEmpty = !data.initialized;
-
-      const local = latestStateRef.current;
-      const localHasData =
-        local.users.length > 1 ||
-        local.items.length > 0 ||
-        local.loans.length > 0;
-
-      if (serverIsEmpty && localHasData) {
-        await pushStateToServer(local);
-        return local;
+  const pullStateFromServer = useCallback(
+    async (force = false) => {
+      // Never overwrite local state while a mutation (borrow/return/delete/stock) is in flight or just completed
+      if (
+        !force &&
+        (inFlightMutationsRef.current > 0 ||
+          Date.now() - lastMutationTimeRef.current < 3500)
+      ) {
+        return null;
       }
 
-      if (data.initialized && serverUsers.length > 0) {
-        const normalizedUsers = serverUsers.map((u: User) =>
-          u.id === 'usr-admin-master'
-            ? {
-                ...u,
-                email: INITIAL_USERS[0].email,
-                password: INITIAL_USERS[0].password,
-              }
-            : u
+      const pullStartedAt = Date.now();
+      try {
+        const res = await fetch('/api/state', { cache: 'no-store' });
+        if (!res.ok) return null;
+        const data = await res.json();
+
+        // If a user action occurred while this GET request was in flight, discard this stale response
+        if (
+          !force &&
+          (inFlightMutationsRef.current > 0 ||
+            lastMutationTimeRef.current >= pullStartedAt)
+        ) {
+          return null;
+        }
+
+        const serverUsers: User[] = Array.isArray(data.users) ? data.users : [];
+        const serverLoans: LoanRecord[] = Array.isArray(data.loans)
+          ? data.loans
+          : [];
+        const rawServerItems: InventoryItem[] = Array.isArray(data.items)
+          ? data.items.map((it: InventoryItem, idx: number) =>
+              sanitizeInventoryItem(it, idx)
+            )
+          : [];
+        const serverItems = reconcileItemsAvailableStock(
+          rawServerItems,
+          serverLoans
         );
-        setUsers(normalizedUsers);
-        setItems(serverItems);
-        setLoans(serverLoans);
-        setEmails(serverEmails);
-        return {
-          users: normalizedUsers,
-          items: serverItems,
-          loans: serverLoans,
-          emails: serverEmails,
-        };
+        const serverEmails: EmailNotification[] = Array.isArray(data.emails)
+          ? data.emails
+          : [];
+
+        const serverIsEmpty = !data.initialized;
+
+        const local = latestStateRef.current;
+        const localHasData =
+          local.users.length > 1 ||
+          local.items.length > 0 ||
+          local.loans.length > 0;
+
+        if (serverIsEmpty && localHasData) {
+          await pushStateToServer(local);
+          return local;
+        }
+
+        if (data.initialized && serverUsers.length > 0) {
+          const normalizedUsers = serverUsers.map((u: User) =>
+            u.id === 'usr-admin-master'
+              ? {
+                  ...u,
+                  email: INITIAL_USERS[0].email,
+                  password: INITIAL_USERS[0].password,
+                }
+              : u
+          );
+          latestStateRef.current = {
+            users: normalizedUsers,
+            items: serverItems,
+            loans: serverLoans,
+            emails: serverEmails,
+          };
+          setUsers(normalizedUsers);
+          setItems(serverItems);
+          setLoans(serverLoans);
+          setEmails(serverEmails);
+          return {
+            users: normalizedUsers,
+            items: serverItems,
+            loans: serverLoans,
+            emails: serverEmails,
+          };
+        }
+      } catch {
+        // Ignore network/API errors in offline preview
       }
-    } catch {
-      // Ignore network/API errors in offline preview
-    }
-    return null;
-  }, [pushStateToServer]);
+      return null;
+    },
+    [pushStateToServer]
+  );
 
   // Initial pull & periodic real-time sync across devices (Laptop <-> Handphone)
   useEffect(() => {
-    pullStateFromServer();
+    pullStateFromServer(true);
     const timer = setInterval(() => {
-      pullStateFromServer();
+      pullStateFromServer(false);
     }, 5000);
     return () => clearInterval(timer);
   }, [pullStateFromServer]);
@@ -325,7 +377,7 @@ export default function App() {
   const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoginError(null);
-    const synced = await pullStateFromServer();
+    const synced = await pullStateFromServer(true);
     const activeUsersList = synced?.users || users;
     const result = authenticateUser(activeUsersList, loginEmail, loginPassword);
     if (result.error || !result.user) {
@@ -490,27 +542,17 @@ export default function App() {
   const handleDeleteLoans = (loanIds: string[]) => {
     if (!loanIds || loanIds.length === 0) return;
     const idSet = new Set(loanIds);
-    const restoreQtyByItemId = new Map<string, number>();
+    const currentLoans = latestStateRef.current.loans;
+    const currentItems = latestStateRef.current.items;
 
-    for (const ln of loans) {
-      if (idSet.has(ln.id) && ln.status === 'dipinjam') {
-        restoreQtyByItemId.set(
-          ln.itemId,
-          (restoreQtyByItemId.get(ln.itemId) || 0) + ln.quantity
-        );
-      }
-    }
+    const nextLoans = currentLoans.filter((l) => !idSet.has(l.id));
+    const nextItems = reconcileItemsAvailableStock(currentItems, nextLoans);
 
-    const nextItems = items.map((it) => {
-      const addBack = restoreQtyByItemId.get(it.id);
-      if (!addBack) return it;
-      return {
-        ...it,
-        availableStock: Math.min(it.totalStock, it.availableStock + addBack),
-      };
-    });
-
-    const nextLoans = loans.filter((l) => !idSet.has(l.id));
+    latestStateRef.current = {
+      ...latestStateRef.current,
+      items: nextItems,
+      loans: nextLoans,
+    };
     setItems(nextItems);
     setLoans(nextLoans);
     pushStateToServer({ items: nextItems, loans: nextLoans });
@@ -519,7 +561,11 @@ export default function App() {
   const handleDeleteEmails = (emailIds: string[]) => {
     if (!emailIds || emailIds.length === 0) return;
     const idSet = new Set(emailIds);
-    const nextEmails = emails.filter((e) => !idSet.has(e.id));
+    const nextEmails = latestStateRef.current.emails.filter((e) => !idSet.has(e.id));
+    latestStateRef.current = {
+      ...latestStateRef.current,
+      emails: nextEmails,
+    };
     setEmails(nextEmails);
     pushStateToServer({ emails: nextEmails });
   };
@@ -531,6 +577,7 @@ export default function App() {
     borrowDate: string;
     dueDate: string;
     durationDays: number;
+    durationHours?: number;
     purposeNotes: string;
     borrowPhotoDataUrl: string;
   }) => {
@@ -556,28 +603,18 @@ export default function App() {
       borrowDate: payload.borrowDate,
       dueDate: payload.dueDate,
       durationDays: payload.durationDays,
+      durationHours: payload.durationHours || 0,
       purposeNotes: payload.purposeNotes,
       borrowPhotoDataUrl: payload.borrowPhotoDataUrl,
       status: 'dipinjam',
     }));
 
-    // Decrement available stock in real-time for all borrowed items
-    const qtyByItemId = new Map<string, number>();
-    for (const entry of borrowList) {
-      qtyByItemId.set(
-        entry.item.id,
-        (qtyByItemId.get(entry.item.id) || 0) + entry.quantity
-      );
-    }
+    const currentLoans = latestStateRef.current.loans;
+    const currentItems = latestStateRef.current.items;
+    const currentEmails = latestStateRef.current.emails;
 
-    const nextItems = items.map((it) => {
-      const deduct = qtyByItemId.get(it.id);
-      if (!deduct) return it;
-      return {
-        ...it,
-        availableStock: Math.max(0, it.availableStock - deduct),
-      };
-    });
+    const nextLoans = [...newLoans, ...currentLoans];
+    const nextItems = reconcileItemsAvailableStock(currentItems, nextLoans);
 
     // Send confirmation emails
     const confirmEmails: EmailNotification[] = newLoans.map((ln) => ({
@@ -590,14 +627,19 @@ export default function App() {
       itemQrCode: ln.itemQrCode,
       type: 'konfirmasi_peminjaman',
       subject: `[Bukti Peminjaman ODipinjam] ${ln.itemName} (${ln.itemQrCode})`,
-      body: `Halo ${currentUser.name},\n\nPeminjaman barang "${ln.itemName}" (Kode QR: ${ln.itemQrCode}, Jumlah: ${ln.quantity} unit) telah berhasil tercatat.\nBatas waktu pengembalian: ${new Date(payload.dueDate).toLocaleDateString('id-ID')} (${payload.durationDays} hari).\nCatatan pemakaian: ${payload.purposeNotes}\n\nSistem akan mengirimkan pengingat email otomatis apabila batas waktu peminjaman hampir habis.`,
+      body: `Halo ${currentUser.name},\n\nPeminjaman barang "${ln.itemName}" (Kode QR: ${ln.itemQrCode}, Jumlah: ${ln.quantity} unit) telah berhasil tercatat.\nWaktu pinjam: ${formatLoanDateTime(payload.borrowDate)}\nBatas waktu pengembalian: ${formatLoanDateTime(payload.dueDate)} (${formatLoanDuration(ln)}).\nCatatan pemakaian: ${payload.purposeNotes}\n\nSistem akan mengirimkan pengingat email otomatis apabila batas waktu peminjaman hampir habis.`,
       sentAt: payload.borrowDate,
       read: false,
     }));
 
-    const nextLoans = [...newLoans, ...loans];
-    const nextEmails = [...confirmEmails, ...emails];
+    const nextEmails = [...confirmEmails, ...currentEmails];
 
+    latestStateRef.current = {
+      ...latestStateRef.current,
+      items: nextItems,
+      loans: nextLoans,
+      emails: nextEmails,
+    };
     setItems(nextItems);
     setLoans(nextLoans);
     setEmails(nextEmails);
@@ -619,14 +661,18 @@ export default function App() {
         ? payload.loanIds
         : [payload.loanId]
     );
-    const targetLoans = loans.filter(
+    const currentLoans = latestStateRef.current.loans;
+    const currentItems = latestStateRef.current.items;
+    const currentEmails = latestStateRef.current.emails;
+
+    const targetLoans = currentLoans.filter(
       (l) => targetIds.has(l.id) && l.status === 'dipinjam'
     );
     if (targetLoans.length === 0) return;
 
     const nowIso = new Date().toISOString();
 
-    const nextLoans: LoanRecord[] = loans.map((l) =>
+    const nextLoans: LoanRecord[] = currentLoans.map((l) =>
       targetIds.has(l.id) && l.status === 'dipinjam'
         ? {
             ...l,
@@ -638,23 +684,8 @@ export default function App() {
         : l
     );
 
-    // Increment available stock back in real-time for all returned loans
-    const returnQtyByItemId = new Map<string, number>();
-    for (const tl of targetLoans) {
-      returnQtyByItemId.set(
-        tl.itemId,
-        (returnQtyByItemId.get(tl.itemId) || 0) + tl.quantity
-      );
-    }
-
-    const nextItems = items.map((it) => {
-      const addBack = returnQtyByItemId.get(it.id);
-      if (!addBack) return it;
-      return {
-        ...it,
-        availableStock: Math.min(it.totalStock, it.availableStock + addBack),
-      };
-    });
+    // Reconcile available stock directly from remaining active loans
+    const nextItems = reconcileItemsAvailableStock(currentItems, nextLoans);
 
     const returnEmails: EmailNotification[] = targetLoans.map((tl, idx) => ({
       id: `email-return-${tl.id}-${Date.now()}-${idx}`,
@@ -666,13 +697,19 @@ export default function App() {
       itemQrCode: tl.itemQrCode,
       type: 'konfirmasi_pengembalian',
       subject: `[Konfirmasi Pengembalian ODipinjam] ${tl.itemName} (${tl.itemQrCode})`,
-      body: `Halo ${tl.userName},\n\nTerima kasih, barang "${tl.itemName}" (${tl.itemQrCode}) sebanyak ${tl.quantity} unit telah diterima kembali pada ${new Date(nowIso).toLocaleString('id-ID')}.\nCatatan kondisi: ${payload.returnNotes}`,
+      body: `Halo ${tl.userName},\n\nTerima kasih, barang "${tl.itemName}" (${tl.itemQrCode}) sebanyak ${tl.quantity} unit telah diterima kembali pada ${formatLoanDateTime(nowIso)}.\nCatatan kondisi: ${payload.returnNotes}`,
       sentAt: nowIso,
       read: false,
     }));
 
-    const nextEmails = [...returnEmails, ...emails];
+    const nextEmails = [...returnEmails, ...currentEmails];
 
+    latestStateRef.current = {
+      ...latestStateRef.current,
+      loans: nextLoans,
+      items: nextItems,
+      emails: nextEmails,
+    };
     setLoans(nextLoans);
     setItems(nextItems);
     setEmails(nextEmails);
@@ -1166,7 +1203,7 @@ export default function App() {
                   onSendManualReminder={handleSendManualReminder}
                   onDeleteLoans={handleDeleteLoans}
                   onDeleteEmails={handleDeleteEmails}
-                  onRefreshState={pullStateFromServer}
+                  onRefreshState={() => pullStateFromServer(true)}
                 />
               )}
               {adminTab === 'users' && (
@@ -1189,7 +1226,7 @@ export default function App() {
                   onSendManualReminder={handleSendManualReminder}
                   onDeleteLoans={handleDeleteLoans}
                   onDeleteEmails={handleDeleteEmails}
-                  onRefreshState={pullStateFromServer}
+                  onRefreshState={() => pullStateFromServer(true)}
                 />
               )}
             </>
