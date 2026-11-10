@@ -1016,6 +1016,17 @@ export function buildInventoryExcelTemplateXlsx(
     { name: 'xl/worksheets/sheet1.xml', data: encoder.encode(sheetXml) },
   ];
 
+  return buildZipArchive(entries);
+}
+
+/**
+ * Packages multiple files (`{ name, data }`) into a standard uncompressed PKZIP (.zip) archive.
+ * Used for both `.xlsx` generation and Bulk Download of QR Code `.png` files.
+ */
+export function buildZipArchive(
+  entries: Array<{ name: string; data: Uint8Array }>
+): Uint8Array {
+  const encoder = new TextEncoder();
   const localChunks: Uint8Array[] = [];
   const cdChunks: Uint8Array[] = [];
   let offset = 0;
@@ -1030,7 +1041,7 @@ export function buildInventoryExcelTemplateXlsx(
     const lv = new DataView(localHeader.buffer);
     lv.setUint32(0, 0x04034b50, true);
     lv.setUint16(4, 20, true);
-    lv.setUint16(6, 0, true);
+    lv.setUint16(6, 0x0800, true); // UTF-8 filename flag
     lv.setUint16(8, 0, true); // Store (0)
     lv.setUint16(10, 0, true);
     lv.setUint16(12, 0x5421, true);
@@ -1049,7 +1060,7 @@ export function buildInventoryExcelTemplateXlsx(
     cv.setUint32(0, 0x02014b50, true);
     cv.setUint16(4, 20, true);
     cv.setUint16(6, 20, true);
-    cv.setUint16(8, 0, true);
+    cv.setUint16(8, 0x0800, true); // UTF-8 filename flag
     cv.setUint16(10, 0, true);
     cv.setUint16(12, 0, true);
     cv.setUint16(14, 0x5421, true);

@@ -12,6 +12,10 @@ import {
   normalizeGoogleDriveImageUrl,
 } from '../utils/inventoryLogic';
 import {
+  downloadBulkItemsQrPng,
+  downloadSingleItemQrPng,
+} from '../utils/qrPngDownload';
+import {
   AlertTriangle,
   ArrowUpDown,
   ArrowUpRight,
@@ -330,6 +334,17 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
 
             <button
               type="button"
+              disabled={filteredItems.length === 0}
+              onClick={() => downloadBulkItemsQrPng(filteredItems)}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-[#0d113a] hover:bg-[#151c54] disabled:opacity-40 rounded-lg transition-colors whitespace-nowrap shrink-0 shadow-xs"
+              title="Bulk download semua QR Barang dalam format PNG (hanya berisi QR dan Nama)"
+            >
+              <Download className="w-3.5 h-3.5 text-[#e71f69]" />
+              Bulk Download QR (.PNG) ({filteredItems.length})
+            </button>
+
+            <button
+              type="button"
               onClick={() =>
                 setSortOrder((prev) => (prev === 'asc' ? 'desc' : 'asc'))
               }
@@ -493,14 +508,26 @@ export const AdminDashboardView: React.FC<AdminDashboardViewProps> = ({
                         )}
                       </td>
                       <td className="py-3 px-4 text-center whitespace-nowrap">
-                        <button
-                          type="button"
-                          onClick={() => onInspectQr(item)}
-                          className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-md transition-colors whitespace-nowrap shrink-0"
-                        >
-                          <QrCode className="w-3.5 h-3.5 text-[#0d113a]" />
-                          Lihat Foto QR
-                        </button>
+                        <div className="inline-flex items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => onInspectQr(item)}
+                            className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-md transition-colors whitespace-nowrap shrink-0"
+                          >
+                            <QrCode className="w-3.5 h-3.5 text-[#0d113a]" />
+                            Lihat Foto QR
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => downloadSingleItemQrPng(item)}
+                            title={`Unduh PNG QR & Nama (${item.name})`}
+                            aria-label={`Unduh PNG QR ${item.name}`}
+                            className="inline-flex items-center gap-1 px-2 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-md transition-colors whitespace-nowrap shrink-0"
+                          >
+                            <Download className="w-3.5 h-3.5 text-[#e71f69]" />
+                            PNG
+                          </button>
+                        </div>
                       </td>
                       <td className="py-3 px-4 text-center whitespace-nowrap">
                         {normalizedImg ? (

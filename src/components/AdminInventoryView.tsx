@@ -10,6 +10,10 @@ import {
   validateBulkInventoryRows,
 } from '../utils/inventoryLogic';
 import {
+  downloadBulkItemsQrPng,
+  downloadSingleItemQrPng,
+} from '../utils/qrPngDownload';
+import {
   createSampleItemIllustrationSvg,
   SAMPLE_BULK_CSV_TEMPLATE,
   SAMPLE_BULK_TEMPLATE_ROWS,
@@ -604,6 +608,23 @@ export const AdminInventoryView: React.FC<AdminInventoryViewProps> = ({
     setTimeout(() => setBulkSuccessMessage(null), 5000);
   };
 
+  const handleBulkDownloadQrPng = (targetList: InventoryItem[]) => {
+    if (targetList.length === 0) {
+      setTableActionMessage({
+        type: 'error',
+        text: 'Belum ada data barang untuk diunduh Kode QR-nya.',
+      });
+      setTimeout(() => setTableActionMessage(null), 4000);
+      return;
+    }
+    const count = downloadBulkItemsQrPng(targetList);
+    setTableActionMessage({
+      type: 'success',
+      text: `Berhasil mengunduh ${count} gambar QR Barang dalam format .PNG (hanya berisi QR & Nama Barang)!`,
+    });
+    setTimeout(() => setTableActionMessage(null), 5000);
+  };
+
   return (
     <div className="space-y-8">
       {/* Top Action Header */}
@@ -617,16 +638,29 @@ export const AdminInventoryView: React.FC<AdminInventoryViewProps> = ({
           </p>
         </div>
 
-        <button
-          type="button"
-          onClick={() => setShowBulkPanel((prev) => !prev)}
-          className="inline-flex items-center gap-2 px-4 py-2 text-xs font-medium text-slate-800 bg-white border border-slate-300 hover:bg-slate-50 rounded-lg transition-colors whitespace-nowrap shrink-0"
-        >
-          <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
-          {showBulkPanel
-            ? 'Tutup Panel Import Kolom / Excel'
-            : 'Bulk Import Barang (Template Kolom / Excel)'}
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            disabled={items.length === 0}
+            onClick={() => handleBulkDownloadQrPng(items)}
+            className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold text-white bg-[#0d113a] hover:bg-[#151c54] disabled:opacity-40 rounded-lg transition-colors whitespace-nowrap shrink-0 shadow-xs"
+            title="Unduh semua Kode QR barang dalam format PNG (hanya berisi QR dan Nama Barang)"
+          >
+            <Download className="w-4 h-4 text-[#e71f69]" />
+            Bulk Download Semua QR (.PNG) ({items.length})
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setShowBulkPanel((prev) => !prev)}
+            className="inline-flex items-center gap-2 px-4 py-2 text-xs font-medium text-slate-800 bg-white border border-slate-300 hover:bg-slate-50 rounded-lg transition-colors whitespace-nowrap shrink-0"
+          >
+            <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
+            {showBulkPanel
+              ? 'Tutup Panel Import Kolom / Excel'
+              : 'Bulk Import Barang (Template Kolom / Excel)'}
+          </button>
+        </div>
       </div>
 
       {/* Bulk Import Excel / Column-by-Column Panel */}
@@ -1334,6 +1368,17 @@ export const AdminInventoryView: React.FC<AdminInventoryViewProps> = ({
 
             <button
               type="button"
+              disabled={filteredItems.length === 0}
+              onClick={() => handleBulkDownloadQrPng(filteredItems)}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-[#0d113a] hover:bg-[#151c54] disabled:opacity-40 rounded-lg transition-colors whitespace-nowrap shrink-0 shadow-xs"
+              title="Download semua QR pada daftar ini dalam format PNG (hanya QR & Nama)"
+            >
+              <Download className="w-3.5 h-3.5 text-[#e71f69]" />
+              Bulk Download QR (.PNG) ({filteredItems.length})
+            </button>
+
+            <button
+              type="button"
               onClick={() =>
                 setSortOrder((prev) => (prev === 'asc' ? 'desc' : 'asc'))
               }
@@ -1505,14 +1550,26 @@ export const AdminInventoryView: React.FC<AdminInventoryViewProps> = ({
                         )}
                       </td>
                       <td className="py-3 px-4 text-center whitespace-nowrap">
-                        <button
-                          type="button"
-                          onClick={() => onInspectQr(item)}
-                          className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-sky-700 bg-sky-50 hover:bg-sky-100 rounded-md transition-colors whitespace-nowrap shrink-0"
-                        >
-                          <QrCode className="w-3.5 h-3.5" />
-                          Lihat Foto QR
-                        </button>
+                        <div className="inline-flex items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => onInspectQr(item)}
+                            className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-sky-700 bg-sky-50 hover:bg-sky-100 rounded-md transition-colors whitespace-nowrap shrink-0"
+                          >
+                            <QrCode className="w-3.5 h-3.5" />
+                            Lihat Foto QR
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => downloadSingleItemQrPng(item)}
+                            title={`Unduh PNG QR & Nama (${item.name})`}
+                            aria-label={`Unduh PNG QR ${item.name}`}
+                            className="inline-flex items-center gap-1 px-2 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-md transition-colors whitespace-nowrap shrink-0"
+                          >
+                            <Download className="w-3.5 h-3.5 text-[#e71f69]" />
+                            PNG
+                          </button>
+                        </div>
                       </td>
                       <td className="py-3 px-4 text-center whitespace-nowrap">
                         {normalizedImg ? (

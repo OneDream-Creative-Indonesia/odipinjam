@@ -4,6 +4,7 @@ import {
   authenticateUser,
   buildAutomatedEmailNotifications,
   buildInventoryExcelTemplateXlsx,
+  buildZipArchive,
   calculateDueState,
   computeMonthlyLoanReport,
   formatDateInputLocal,
@@ -18,6 +19,10 @@ import {
   validateBorrowRequest,
   validateBulkInventoryRows,
 } from './inventoryLogic';
+import {
+  dataUrlToPngBytes,
+  sanitizeQrPngFilename,
+} from './qrPngDownload';
 import { SAMPLE_BULK_CSV_TEMPLATE, SAMPLE_BULK_TEMPLATE_ROWS } from '../data/seedData';
 import { InventoryItem, LoanRecord, User } from '../types/inventory';
 
@@ -426,4 +431,30 @@ test('formatLoanDuration formats day and hour durations accurately', () => {
     formatLoanDuration({ durationDays: 3, durationHours: 0 }),
     '3 hari'
   );
+});
+
+test('buildZipArchive and QR PNG helpers package multiple PNG files into a valid ZIP archive', () => {
+  assert.equal(
+    sanitizeQrPngFilename('Lensa Sony 18-105 MM / E-Mount'),
+    'Lensa_Sony_18-105_MM_-_E-Mount'
+  );
+
+  // 1x1 transparent PNG base64
+  const samplePngDataUrl =
+    'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+  const pngBytes = dataUrlToPngBytes(samplePngDataUrl);
+  assert.ok(pngBytes.length > 20);
+  // PNG magic header: 0x89 0x50 0x4E 0x47
+  assert.equal(pngBytes[0], 0x89);
+  assert.equal(pngBytes[1], 0x50);
+  assert.equal(pngBytes[2], 0x4e);
+  assert.equal(pngBytes[3], 0x47);
+
+  const zipBytes = buildZipArchive([
+    { name: '001_Kamera_Sony_INV-001.png', data: pngBytes },
+    { name: '002_Lensa_Sony_INV-002.png', data: pngBytes },
+  ]);
+  assert.equal(zipBytes[0], 0x50);
+  assert.equal(zipBytes[1], 0x4b);
+  assert.ok(zipBytes.length > pngBytes.length * 2);
 });
